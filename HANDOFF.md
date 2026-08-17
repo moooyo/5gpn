@@ -1,216 +1,148 @@
-# Docker delivery handoff
+# 5gpn Docker integration handoff
 
-**Recorded:** 2026-08-16
+**Recorded:** 2026-08-18
 
 This file is a pickup record, not an architecture authority. Read
 [`AGENTS.md`](AGENTS.md), [`docs/architecture.md`](docs/architecture.md), and
-[`MEMORY.md`](MEMORY.md) before changing behavior. Those documents define the
-current contract; this file records the exact development state, evidence, and
-remaining release work.
+[`MEMORY.md`](MEMORY.md) first. Those documents define current behavior; this
+file records the recovered Docker work, the maintenance-line merge, and the
+remaining delivery work.
 
-## Pickup snapshot
+## Recovered branch state
 
-| Scope | Remote branch | Implementation commit | Intended base |
-| --- | --- | --- | --- |
-| Installer, Docker assembly, CI, and release | `moooyo/5gpn:codex/docker-runtime` | `5da2c6c225e5d52c3a99816882e8004d098ad089` | `origin/main@6068376c3816cd76021c778635ed60b3a71a26d8` (`0.0.80`) |
-| Runtime | `moooyo/mihomo:codex/docker-runtime` | `9b7295f625c38dbcbfe171da364501ffab0eae95` | `origin/feat/5gpn-monolith@5798f177fbe0ef209d50e39204c16b21e53194ee` |
-| Console | no change in this work | pinned `v3.16.1-monolith.30` | `moooyo/zashboard:feat/5gpn-console` |
+| Scope | Branch or source | Recovered commit | Relationship at pickup |
+|---|---|---|---|
+| Root installer and Docker assembly | `moooyo/5gpn:codex/docker-runtime` | `ca25ff750612d923d4a0ed865be31f481cde262f` | Three commits above `0.0.80`; the current `origin/main` tip is `af5be1b3e98a0d98399b37332aab7be626f6ba27`, 21 commits ahead of that base. |
+| Container-aware runtime | `moooyo/mihomo:codex/docker-runtime` | `9b7295f625c38dbcbfe171da364501ffab0eae95` | Must be integrated with the current `feat/5gpn-monolith` maintenance tip before a new Core release is cut. |
+| Console | `moooyo/zashboard:feat/5gpn-console` | no Docker-only patch | The Docker image must consume the exact Console coordinate paired with the current Core in `release/pins.env`. |
+| Extensions | `moooyo/5gpn-extensions:main` | no Docker-only patch | Acceptance inputs must use an immutable reviewed revision and digest. |
 
-The 5gpn branch contains these implementation commits:
+The root Docker branch introduced the single-image delivery in `5da2c6c` and
+later recorded its pickup state in `ca25ff7`. The runtime branch introduced
+certificate reload support in `7370b743` and the managed container lifecycle in
+`9b7295f6`. No Docker PR, tag, GitHub Release, or GHCR image was published from
+those branches.
 
-- `3d5c980` — align the host interception signer with the installer-owned
-  `0750` directory boundary;
-- `5da2c6c` — add the single-image, single-container Docker delivery.
+## Valid design that survives the maintenance merge
 
-The mihomo branch contains:
+- Docker is an alternative packaging and lifecycle for the same monolith. It is
+  one `linux/amd64` image, one container, one Compose service, and one
+  long-running product process. Synchronous bootstrap ends with
+  `exec 5gpn-mihomo`, so Mihomo remains PID 1.
+- The first supported host is rootful Docker Engine 28 or newer with pure
+  cgroup v2, the systemd cgroup driver, no daemon `userns-remap`, a private
+  cgroup namespace, writable cgroup delegation, and the shipped clone3-aware
+  seccomp profile. The container uses no `privileged`, `SYS_ADMIN`, Docker
+  socket, unconfined seccomp profile, or host cgroup bind mount.
+- Fixed UID/GID `10001:10001` owns the container process, delegated cgroup, and
+  both persistent-volume ABIs. The image root is read-only;
+  `fivegpn-data:/etc/5gpn` and `fivegpn-ui:/opt/5gpn/ui` are the two durable
+  volumes, while only runtime scratch paths are tmpfs.
+- Docker certificate issuance is Cloudflare DNS-01 only. Trusted public and
+  interception certificate helpers are short-lived, serialized, waited process
+  groups. Runtime helpers start only after the mandatory real worker-isolation
+  probe and are terminated before engine shutdown. Compose grants the complete
+  shutdown path 45 seconds before forced termination.
+- The simplified delivery intentionally accepts weaker trusted-key isolation:
+  the same `fivegpn` identity may read the Cloudflare credential, ACME account,
+  public private keys, and interception CA key. Untrusted extension code still
+  runs only in fresh bounded worker processes.
+- Public `:443` maps to the container-only data-plane socket on `:9443`, while
+  the load-bearing controller stays on `127.0.0.1:443` and the sniffed target
+  remains port 443. The current published ingress set has no product `:5060`
+  listener.
+- The GitHub Release remains exactly three assets. The same tag may publish
+  `ghcr.io/moooyo/5gpn:<tag>` as a separate registry artifact. Stable may move
+  `latest` only after immutable GitHub publication; beta never moves it.
+- Image preparation consumes the same bound `release/pins.env` and strict
+  `release/pins.sh` parser as the host installer. It creates no Docker-only lock
+  and requires the Core's exact offline
+  `5gpn-container-runtime-v2` handshake.
 
-- `7370b743` — make TLS keypair reload work for both ordinary in-place writes
-  and atomic parent-symlink generation switches;
-- `9b7295f6` — add the managed container runtime lifecycle, certificate manager,
-  orderly restart/termination, and complete subsystem shutdown.
+## Root adaptation completed
 
-Both branches were pushed normally with upstream tracking. No pull request,
-tag, GitHub Release, or GHCR publication was created. This handoff is a later
-documentation-only commit, so the development acceptance below deliberately
-names its parent implementation commit `5da2c6c`; release acceptance must be
-rerun on the eventual exact tag commit.
+The root Docker implementation now follows the current installer and runtime
+contracts:
 
-Canonical local development worktrees at handoff time:
+1. Durable `/etc/5gpn/dns.env` contains exactly the six current installation
+   coordinates. It contains no controller secret, fixed listener field,
+   controller path, certificate path, policy, or runtime tuning field.
+2. The controller secret has one persistent source: operator-owned
+   `/etc/5gpn/mihomo/config.yaml`. Fresh container bootstrap may generate it
+   once into that YAML, but must never mirror it into `dns.env` or another
+   credential file.
+3. Existing operator YAML is inspected through the pinned Core's owner-scoped
+   `5gpn-config inspect-controller --owner-uid` version-2 projection. Existing
+   `dns.json`, `intercept.json`, and `bot.json` are validated through
+   `5gpn-state validate --owner-uid`; container shell code must not maintain a
+   second schema decoder.
+4. The state root and document metadata match the current Core contract. Any
+   data volume produced by container-runtime-v1 is rejected unchanged. There
+   is no compatibility alias, automatic rewrite, or in-place volume migration.
+5. The separate persistent `fivegpn-ui` volume contains the Console and both
+   profiles as one complete generation at `/opt/5gpn/ui/current`, including the
+   current primary/compat manifests and stable top-level file checks. A flat
+   copied tree and the retired UI tmpfs are not current behavior.
+6. The fresh/reset seed comes from the current template: rule mode,
+   `MATCH,Proxies`, one fixed UDP/443 reject, no `:5060` listener, and no static
+   gateway `IP-CIDR` rule. The Core owns the dynamic private-carrier anti-loop
+   guard.
+7. Docker component preparation, hosted CI, release publication, notices, and
+   acceptance read coordinates only from the bound pin manifest and use the
+   current paired Core/Console review contract.
+8. Container probes expect `5gpn-interception` capability and review contract
+   version 7 and cover the current controller, state, UI-generation, and
+   certificate boundaries.
+9. Compose uses a 45-second stop grace period and Docker acceptance runs on a
+   disposable Engine 28 target reached through
+   `test-env`. The working gateway is authorized only for read-only deployment
+   smoke and must not receive container recreation, OOM injection, certificate
+   mutation, or other fault-injection work.
 
-```text
-/Users/moooyo/.codex/worktrees/f7b3/5gpn
-/Users/moooyo/.codex/worktrees/f7b3/mihomo
-```
+## Historical evidence and its limit
 
-## Delivered behavior
+The older branches passed a development-mode Docker 28 acceptance run on
+`test-env`. That run covered the real cgroup-FD startup probe, authenticated
+capabilities, JavaScript execution, a 512 MiB worker OOM, PID 1 survival,
+certificate hot reload, transactional recreation, and named-volume
+persistence across both durable roots. The candidate image was assembled from
+a previously built local base after Docker Hub timeouts, so the result was
+explicitly development-only.
 
-- One `linux/amd64` image, one container, one Compose service, and one
-  long-running process. Synchronous bootstrap ends with `exec 5gpn-mihomo`, so
-  the monolith remains PID 1.
-- An IPv4-only user-defined bridge publishes the supported ports. Public 443 is
-  translated to the Docker-only data-plane socket on container port 9443;
-  controller `127.0.0.1:443` and the public target port remain unchanged.
-- The fixed `10001:10001` identity owns the named-volume ABI and the private
-  delegated cgroup. The Compose boundary uses Docker Engine 28 writable-cgroup
-  delegation, the checked clone3-aware seccomp profile, no capabilities,
-  `no-new-privileges`, a read-only root, and tmpfs runtime paths.
-- Docker certificate bootstrap is Cloudflare DNS-01 only. The simplified owner
-  decision intentionally lets the same trusted container identity read the CF
-  token, ACME state, public keys, and interception CA key.
-- Mihomo starts trusted public/interception certificate helpers only after the
-  real worker isolation probe. Helpers are serialized process groups, are
-  always waited, and are terminated before engine shutdown.
-- SIGTERM and managed `/restart` converge on complete orderly shutdown. A
-  bounded hard-exit watchdog covers a blocked startup, reload, or operator
-  hook. Fatal outcomes remain non-zero.
-- Public DoT and controller certificates follow atomic generation-symlink
-  changes without process restart. Ordinary same-inode/same-size file rewrites
-  also remain reloadable.
-- Certificate helpers claim only strict empty directories. Marker publication
-  uses same-filesystem staging, fixed no-clobber candidates, exact byte/size and
-  ownership validation, and bounded recovery of an empty `0700` directory that
-  was interrupted before reaching `0750`.
-- Image assembly consumes the independent mihomo and zashboard pins already in
-  `install.sh`; there is no second component lock. A stale core without the
-  exact `5gpn-container-runtime-v1` handshake cannot enter an image.
-- GitHub Release remains exactly three assets. The matching OCI image is a GHCR
-  artifact; stable may advance `latest`, beta may not.
-- Release publication is resumable but fail-closed: exact image content and
-  labels, immutable release identity, tag provenance, stable monotonicity, and
-  final `latest` ordering are all revalidated.
-- Test-env acceptance now proves its Git root and `HEAD`, compares each
-  versioned acceptance input directly with the raw `HEAD` blob, and separately
-  binds the core digest and image ID. A dirty or weakened local probe cannot
-  emit release evidence merely by repeating an expected commit string.
+That evidence is not transferable to the current maintenance merge. It binds
+the old root implementation commit, old runtime binary, old probe corpus, and
+old image ID. It must not populate or satisfy the release variables for a new
+tag.
 
-## Verification completed
+## Release blockers and required order
 
-All builds and tests were run on `ssh test-env`; no local build or test was
-used.
+The root implementation is not publishable with the current pin pair. Pinned
+Core `.32` does not implement container-runtime-v2. Deployment-neutral
+Zashboard setup wording has landed on its maintenance branch but has no
+immutable release and is not yet pinned.
 
-Mihomo:
+1. Finish and review the Mihomo maintenance integration for the v2 container
+   lifecycle, cgroup layout, certificate manager, TLS reload, and orderly
+   shutdown.
+2. Run the proportional Mihomo build, race, vet, and acceptance gates remotely
+   on `test-env`; do not run them locally.
+3. Publish immutable container-capable Mihomo and deployment-neutral Zashboard
+   releases.
+4. Update their paired coordinates in `release/pins.env` and the
+   human-readable notice table.
+5. Run the full root shell, pin, image, and container-policy gates remotely.
+6. Build the exact reproducible image from a clean final commit with the pinned
+   Dockerfile frontend, base image, source epoch, and normalized timestamps.
+7. Run `tests/container-acceptance.sh` in release mode against that exact image
+   on the disposable Docker target.
+8. Record only that run's exact values in
+   `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
+   `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
+   `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID`.
+9. Require the release workflow rebuild to reproduce the accepted image ID
+   before publishing the exact GHCR tag. Move stable `latest` only after the
+   GitHub Release is immutable.
 
-```text
-go test -p 1 -count=1 . ./5gpn ./component/ca ./hub ./hub/route
-go test -race -p 1 -count=1 . ./5gpn/... ./component/ca ./hub ./hub/route
-go vet -p 1 ./5gpn/...
-go build -p 1 ./...
-```
-
-All passed. The race suite was serialized because test-env has about 3.8 GiB
-RAM and no swap; the earlier whole-repository parallel protocol run was killed
-by host memory pressure, not by a Go assertion.
-
-5gpn:
-
-```text
-for t in tests/test_*.sh; do bash "$t"; done
-bash tests/verify-artifact-pins.sh
-docker-compose-v5.4.0 -f compose.yaml config --format json
-```
-
-All installer, policy, certificate, release-bundle, and Docker helper tests
-passed. Mihomo, zashboard, and all three Gum artifact pins matched their
-published assets. Compose v5.4 expanded the single-service schema successfully.
-
-Final Docker 28 development acceptance passed with:
-
-```text
-FIVEGPN_CONTAINER_ACCEPTANCE_PROBES_SHA256=d912ead28eaf1d1deac076b07487b5f46446be67994ce0eaf6d546baa7315849
-FIVEGPN_CONTAINER_DEVELOPMENT_ACCEPTED_COMMIT=5da2c6c225e5d52c3a99816882e8004d098ad089
-FIVEGPN_CONTAINER_DEVELOPMENT_ACCEPTED_MIHOMO_BINARY_SHA256=e582f5aaaf064b99a64f42df7c8d88fac5ad5c6eb96cb2646919db7f56c79eff
-FIVEGPN_CONTAINER_DEVELOPMENT_ACCEPTED_IMAGE_ID=sha256:4a9abfa568cb9d2caef4e4dbbf747f50314d1422ebe13107939c3858262ddf85
-```
-
-That run covered the real cgroup-FD startup probe, authenticated capabilities,
-healthy JavaScript execution, interception signing, a 512 MiB action-cgroup
-OOM and its classification, PID 1 survival, public DoT/controller certificate
-hot reload without PID replacement, transactional container recreation, and
-byte-stable named-volume persistence.
-
-### Development-image qualification
-
-Docker Hub repeatedly timed out while resolving both the digest-pinned
-Dockerfile frontend and the digest-pinned Debian base. To finish runtime
-acceptance without weakening either pin, the development image was assembled
-from the six-day-old local `5gpn:dev-test` image built from the same
-Dockerfile/package snapshot, then overlaid with the exact committed runtime,
-entrypoint, helpers, UI, component manifest, notices, and labels.
-
-This is valid **development runtime evidence only**. It is intentionally named
-`FIVEGPN_CONTAINER_DEVELOPMENT_ACCEPTED_*` and must never be copied into the
-three release variables or described as a reproducible release image.
-
-## Publication blocker
-
-`install.sh` still pins `v1.19.28-monolith.29` with compressed-asset SHA-256
-`d04749b6b51974a788028b6596a3a2db803ca4144f60f915cd696c181f7a7ae3`.
-That published binary predates `5gpn-container-runtime-v1`. Consequently the
-new hosted Docker-image job and release image preparation are expected to fail
-closed at the container-contract probe until a new mihomo release exists.
-
-Do not bypass that probe or substitute the development binary in a release.
-
-## Exact next steps
-
-1. Review/merge the mihomo runtime branch into the intended
-   `feat/5gpn-monolith` delivery line.
-2. Build the immutable Linux amd64-compatible mihomo artifact from the reviewed
-   runtime commit with `with_gvisor`, `-trimpath`, explicit version/build-time
-   ldflags, and an empty build ID. Publish a new mihomo tag and release asset.
-3. Download the compressed asset and record its SHA-256. Update every enforced
-   runtime version/digest copy in 5gpn together, including `install.sh` and the
-   matching checks workflow references.
-4. Run all 5gpn shell tests and `bash tests/verify-artifact-pins.sh` again.
-5. With Docker Hub access restored, build the exact candidate using the pinned
-   BuildKit image, pinned Dockerfile frontend, pinned Debian base, tag commit,
-   `SOURCE_DATE_EPOCH`, and `rewrite-timestamp=true`.
-6. Run `tests/container-acceptance.sh` in **release mode** from a clean checkout
-   at that exact final 5gpn commit, using the compressed mihomo artifact digest.
-7. Only after that run, set these repository variables from its output:
-
-   ```text
-   FIVEGPN_CONTAINER_ACCEPTED_COMMIT
-   FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256
-   FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID
-   ```
-
-8. Rebuild once more in the release workflow and require the candidate image ID
-   to equal the accepted ID before publishing the exact GHCR tag. Stable
-   `latest` moves only after the GitHub Release becomes immutable.
-
-## Test-env cleanup state
-
-The development test container, temporary Docker 28 daemon, its remaining
-`nsfs` mount, volumes, images, credentials, PKI material, logs, and the
-marker-owned `/var/tmp/5gpn-docker-dev` tree were removed after acceptance.
-
-The host gateway was not replaced or restarted:
-
-```text
-5gpn-mihomo.service ActiveState=active
-MainPID=2964626
-NRestarts=0
-system Docker running containers=0
-```
-
-`/var/tmp/5gpn-codex-019fe480` was deliberately retained because it has no
-validated 5gpn ownership marker. Do not recursively delete it without a new,
-explicit provenance decision. Other historical `/var/tmp/5gpn-*` paths and an
-old interactive TUI process were likewise outside this task's cleanup scope.
-
-## Resume checks
-
-```bash
-git -C /Users/moooyo/.codex/worktrees/f7b3/mihomo fetch --prune origin
-git -C /Users/moooyo/.codex/worktrees/f7b3/mihomo status -sb
-git -C /Users/moooyo/.codex/worktrees/f7b3/mihomo log --oneline origin/feat/5gpn-monolith..HEAD
-
-git -C /Users/moooyo/.codex/worktrees/f7b3/5gpn fetch --prune origin
-git -C /Users/moooyo/.codex/worktrees/f7b3/5gpn status -sb
-git -C /Users/moooyo/.codex/worktrees/f7b3/5gpn log --oneline origin/main..HEAD
-```
-
-Use ordinary non-force pushes. Do not publish a tag, GHCR image, or release
-until the new immutable mihomo pin and exact release-mode test-env evidence are
-both present.
+Use ordinary non-force pushes. Do not publish a tag, GHCR image, or GitHub
+Release until the current pin manifest, exact release-mode evidence, and final
+image identity all agree.

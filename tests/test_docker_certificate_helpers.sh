@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PUBLIC="$ROOT/docker/docker-public-cert.sh"
 INTERCEPT="$ROOT/docker/docker-intercept-cert.sh"
-TMP="$(mktemp -d)"
+IOS_PROFILE="$ROOT/scripts/gen-ios-profile.sh"
+TMP="$(mktemp -d /tmp/5gpn-docker-cert.XXXXXX)"
 trap 'rm -rf -- "$TMP"' EXIT
 
 fail() { echo "FAIL: $*"; exit 1; }
@@ -23,81 +24,10 @@ done
     || fail "role-derived paths are expanded in the same local declaration"
 
 for helper in "$PUBLIC" "$INTERCEPT"; do
-    (
-        # shellcheck disable=SC1090
-        source "$helper"
-        marker=.5gpn-test-owned
-        value=5gpn-test-marker-v1
-        root="$TMP/marker-$(basename -- "$helper")"
-        mkdir "$root"
-        chmod 0700 "$root"
-        printf '%s\n' foreign > "$root/foreign"
-        chmod 0600 "$root/foreign"
-        if write_marker_if_absent "$root" "$marker" "$value" 600; then
-            fail "marker helper adopted a non-empty unowned directory: $helper"
-        fi
-        [[ ! -e "$root/$marker" ]] \
-            || fail "marker appeared in a non-empty unowned directory: $helper"
-
-		rm -f -- "$root/foreign"
-		printf '%s\n' unowned > "$root/${marker}.candidate"
-		chmod 0600 "$root/${marker}.candidate"
-		if write_marker_if_absent "$root" "$marker" "$value" 600; then
-			fail "invalid fixed marker candidate was deleted or adopted: $helper"
-		fi
-		[[ "$(<"$root/${marker}.candidate")" == unowned ]] \
-			|| fail "invalid fixed marker candidate was modified: $helper"
-		printf '%s\n\n' "$value" > "$root/${marker}.candidate"
-		if write_marker_if_absent "$root" "$marker" "$value" 600; then
-			fail "marker candidate with trailing bytes was accepted: $helper"
-		fi
-		printf '%s\n' "$value" > "$root/${marker}.candidate"
-		write_marker_if_absent "$root" "$marker" "$value" 600 \
-			|| fail "fixed marker candidate did not recover: $helper"
-        [[ "$(<"$root/$marker")" == "$value" \
-           && ! -e "$root/${marker}.candidate" ]] \
-			|| fail "marker recovery left an incomplete candidate: $helper"
-
-		fresh="$TMP/marker-fresh-$(basename -- "$helper")"
-		mkdir "$fresh"
-		chmod 0700 "$fresh"
-		write_marker_if_absent "$fresh" "$marker" "$value" 600 \
-			|| fail "fresh marker staging did not publish: $helper"
-		owned_exact_line_file "$fresh/$marker" 600 "$value" \
-			|| fail "fresh marker staging published the wrong bytes: $helper"
-
-		collision="$TMP/marker-collision-$(basename -- "$helper")"
-		mkdir "$collision"
-		chmod 0700 "$collision"
-		printf '%s\n' foreign > "$collision/$marker"
-		printf '%s\n' "$value" > "$collision/${marker}.candidate"
-		chmod 0600 "$collision/$marker" "$collision/${marker}.candidate"
-		if write_marker_if_absent "$collision" "$marker" "$value" 600; then
-			fail "existing marker collision was overwritten: $helper"
-		fi
-		[[ "$(<"$collision/$marker")" == foreign \
-		   && -f "$collision/${marker}.candidate" ]] \
-			|| fail "marker collision changed existing state: $helper"
-
-		repair="$TMP/mode-repair-$(basename -- "$helper")"
-        mkdir "$repair"
-        chmod 0700 "$repair"
-        ensure_owned_directory "$repair" 750 \
-            || fail "empty interrupted 0750 directory did not recover: $helper"
-        [[ "$(path_mode "$repair")" == 750 ]] \
-            || fail "recovered directory has the wrong mode: $helper"
-
-        refuse="$TMP/mode-refuse-$(basename -- "$helper")"
-        mkdir "$refuse"
-        chmod 0700 "$refuse"
-        printf '%s\n' state > "$refuse/state"
-        chmod 0600 "$refuse/state"
-        if ensure_owned_directory "$refuse" 750; then
-            fail "populated wrong-mode directory was silently broadened: $helper"
-        fi
-    )
+    ! grep -Eq '^(ensure_owned_directory|write_marker_if_absent)\(\)' "$helper" \
+        || fail "runtime helper can recreate a missing v2 ownership root: $helper"
 done
-pass "Docker helper marker and directory creation recover only bounded empty state"
+pass "Docker runtime helpers require the image-seeded v2 ownership roots"
 
 grep -Fxq 'CONFIG_FILE=/run/5gpn-bootstrap/config.env' "$PUBLIC" \
     && grep -Fxq 'CF_CREDENTIAL=/run/5gpn/cloudflare.ini' "$PUBLIC" \
@@ -106,26 +36,34 @@ grep -Fxq 'CONFIG_FILE=/run/5gpn-bootstrap/config.env' "$PUBLIC" \
 grep -Fq 'certonly' "$PUBLIC" \
     && grep -Fq -- '--dns-cloudflare' "$PUBLIC" \
     && grep -Fq -- '-d "*.${BASE_DOMAIN}"' "$PUBLIC" \
-    && grep -Fq 'local -a roles=(dot console)' "$PUBLIC" \
+    && grep -Fq 'cert_role_ctl_publish_pair' "$PUBLIC" \
     || fail "public helper is not one Cloudflare apex+wildcard lineage with two roles"
 grep -Fq 'return 75' "$PUBLIC" \
     || fail "public bootstrap does not distinguish temporary Certbot failure"
 grep -Fq 'LINEAGE_READY_MARKER=.5gpn-docker-lineage-ready' "$PUBLIC" \
     || fail "public helper has no durable first-lineage commit marker"
-grep -Fq 'tombstone=".delete.${name}"' "$PUBLIC" \
-    && grep -Fq 'fsync_directory "$root/generations"' "$PUBLIC" \
-    || fail "role generation publication/GC has no durable tombstone protocol"
+grep -Fq 'cert_role_ctl_remove_generation' "$ROOT/scripts/cert-role-ctl.sh" \
+    && grep -Fq 'publication_fs_commit_relative_pointer' "$ROOT/scripts/cert-role-ctl.sh" \
+    || fail "shared role publication/GC has no durable pointer and tombstone protocol"
 publish_roles_text="$(sed -n '/^publish_roles()/,/^}/p' "$PUBLIC")"
-final_move_line="$(grep -nF 'mv -- "$stage" "$final"' <<< "$publish_roles_text" | cut -d: -f1)"
-final_sync_line="$(grep -nF 'fsync_directory "$root/generations"' <<< "$publish_roles_text" | head -1 | cut -d: -f1)"
-current_link_line="$(grep -nF 'ln -s -- "generations/$(basename -- "$final")"' <<< "$publish_roles_text" | cut -d: -f1)"
-[[ -n "$final_move_line" && -n "$final_sync_line" && -n "$current_link_line" \
-   && "$final_move_line" -lt "$final_sync_line" && "$final_sync_line" -lt "$current_link_line" ]] \
-    || fail "role current can publish before its final generation directory is durable"
+grep -Fq 'cert_role_ctl_repair_recoverable_tree' <<< "$publish_roles_text" \
+    && grep -Fq 'cert_role_ctl_publish_pair' <<< "$publish_roles_text" \
+    && ! grep -Fq 'rollback' <<< "$publish_roles_text" \
+    || fail "Docker role publication bypasses the shared repair-forward publisher"
 grep -Fq 'cert_chain_trusted "$live/cert.pem" "$live/chain.pem"' "$PUBLIC" \
     || fail "public certificate acceptance is not bound to system trust"
-grep -Fq 'bash "$IOSGEN" "$DOT_DOMAIN" "$GATEWAY_IP" "$UI_DIR"' "$PUBLIC" \
-    || fail "public publication does not re-sign both profiles"
+grep -Fq 'ui_generation_stage_tree "$UI_DIR" "$UI_SOURCE" "$version"' "$PUBLIC" \
+    && grep -Fq 'ui_generation_clone_current "$UI_DIR"' "$PUBLIC" \
+    && grep -Fq 'ui_generation_publish "$UI_DIR" "$candidate"' "$PUBLIC" \
+    && grep -Fq 'bash "$IOSGEN" "$DOT_DOMAIN" "$GATEWAY_IP" "$candidate"' "$PUBLIC" \
+    && grep -Fq 'profiles_match_live_inputs "$current"' "$PUBLIC" \
+    && grep -Fq 'dot_signer_leaf_sha256' "$PUBLIC" \
+    && grep -Fq 'intercept_ca_der_sha256' "$PUBLIC" \
+    || fail "public publication does not use the complete idempotent UI generation transaction"
+grep -Fq 'ui_generation_cleanup_orphan_candidates "$UI_DIR"' "$PUBLIC" \
+    && grep -Fq 'profile_stage_parent=/run/5gpn' "$IOS_PROFILE" \
+    && grep -Fq 'stage_dir="$(mktemp -d "${profile_stage_parent}/.ios-profile.XXXXXX")"' "$IOS_PROFILE" \
+    || fail "Docker profile signing can leave private staging material in the persistent UI volume"
 
 grep -Fxq 'CERT_REQUEST=/etc/5gpn/mihomo/5gpn/certificate-request' "$INTERCEPT" \
     && grep -Fxq 'CERT_STATE=/etc/5gpn/intercept/cert-state' "$INTERCEPT" \
@@ -152,6 +90,10 @@ grep -Fq 'request_is_current || return 3' "$INTERCEPT" \
     LE_LOG_ROOT="$LE_ROOT/log"
     CERT_ROOT="$TMP/cert"
     UI_DIR="$TMP/ui"
+    UI_SOURCE="$TMP/ui-source"
+    UI_GENERATION_HELPER="$ROOT/scripts/ui-generation.sh"
+    PUBLICATION_FS_HELPER="$ROOT/scripts/publication-fs.sh"
+    CERT_ROLE_HELPER="$ROOT/scripts/cert-role-ctl.sh"
     IOSGEN="$TMP/gen-ios-profile.sh"
     LOCK_FILE="$TMP/public.lock"
 
@@ -244,24 +186,51 @@ EOF
     fi
     rmdir "$LE_LIVE_ROOT/unrelated.test"
 
-	mkdir -p "$CERT_ROOT/dot/generations" "$CERT_ROOT/console/generations" "$UI_DIR"
-	chmod 0700 "$CERT_ROOT"
+	mkdir -p "$CERT_ROOT/dot/generations" "$CERT_ROOT/console/generations" \
+        "$UI_DIR" "$UI_SOURCE/assets"
+	chmod 0751 "$CERT_ROOT"
 	chmod 0750 "$CERT_ROOT/dot" "$CERT_ROOT/console" \
 		"$CERT_ROOT/dot/generations" "$CERT_ROOT/console/generations"
+	printf '%s\n' 5gpn-config > "$TMP/.5gpn-owned"
+	chmod 0644 "$TMP/.5gpn-owned"
+	printf '%s\n' "$CERT_ROOT_MARKER_VALUE" > "$CERT_ROOT/$CERT_ROOT_MARKER"
+	chmod 0644 "$CERT_ROOT/$CERT_ROOT_MARKER"
 	for role in dot console; do
 		printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:${role}" \
 			> "$CERT_ROOT/$role/$CERT_ROLE_MARKER"
-		chmod 0600 "$CERT_ROOT/$role/$CERT_ROLE_MARKER"
+		chmod 0644 "$CERT_ROOT/$role/$CERT_ROLE_MARKER"
 	done
 	chmod 0755 "$UI_DIR"
-    printf '%s\n' "$UI_MARKER_VALUE" > "$UI_DIR/$UI_MARKER"
-    chmod 0644 "$UI_DIR/$UI_MARKER"
+    printf '%s\n' '<!doctype html><title>fixture</title>' > "$UI_SOURCE/index.html"
+    printf '%s\n' 'console.log("fixture")' > "$UI_SOURCE/assets/app.js"
+    chmod 0755 "$UI_SOURCE" "$UI_SOURCE/assets"
+    chmod 0644 "$UI_SOURCE/index.html" "$UI_SOURCE/assets/app.js"
+    # Load the real generation functions through the test path. The production
+    # loader separately pins root-owned /opt metadata before sourcing it.
+    source "$UI_GENERATION_HELPER"
+    UI_HELPER_LOADED=1
+    component_value() {
+        [[ "$1" == ZASH_VERSION ]] || return 1
+        printf '%s' v-test
+    }
     cat > "$IOSGEN" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 printf 'signed-dot:%s:%s\n' "$1" "$2" > "$3/ios-dot.mobileconfig"
 printf 'signed-ca:%s\n' "$1" > "$3/ios-intercept-ca.mobileconfig"
-chmod 0644 "$3/ios-dot.mobileconfig" "$3/ios-intercept-ca.mobileconfig"
+dot_digest="$(sha256sum "$3/ios-dot.mobileconfig" | awk '{print $1}')"
+ca_digest="$(sha256sum "$3/ios-intercept-ca.mobileconfig" | awk '{print $1}')"
+printf '%s\n' \
+    'version=1' \
+    "dot_signer_leaf_sha256=$(printf leaf | sha256sum | awk '{print $1}')" \
+    "dot_public_key_sha256=$(printf key | sha256sum | awk '{print $1}')" \
+    "intercept_ca_der_sha256=$(printf ca | sha256sum | awk '{print $1}')" \
+    "domain=$1" \
+    "gateway_ipv4=$2" \
+    "ios_dot_sha256=$dot_digest" \
+    "ios_intercept_ca_sha256=$ca_digest" > "$3/.5gpn-profile-inputs"
+chmod 0644 "$3/ios-dot.mobileconfig" "$3/ios-intercept-ca.mobileconfig" \
+    "$3/.5gpn-profile-inputs"
 EOF
     chmod 0755 "$IOSGEN"
 
@@ -274,7 +243,23 @@ EOF
         cmp -s "$LE_LIVE_ROOT/$BASE_DOMAIN/privkey.pem" "$CERT_ROOT/$role/current/privkey.pem" \
             || fail "$role key differs from the canonical lineage"
     done
-    publish_profiles || fail "public helper did not publish both signed profile files"
+    publish_profiles || fail "public helper did not publish a complete Console/profile generation"
+    [[ -L "$UI_DIR/current" ]] || fail "Console current is not an atomic generation symlink"
+    current_ui="$(ui_generation_current_path "$UI_DIR")" \
+        || fail "published Console current did not validate"
+    [[ -f "$current_ui/index.html" \
+       && -f "$current_ui/assets/app.js" \
+       && -f "$current_ui/ios-dot.mobileconfig" \
+       && -f "$current_ui/ios-intercept-ca.mobileconfig" \
+       && -f "$current_ui/.5gpn-profile-inputs" \
+       && ! -e "$UI_DIR/ios-dot.mobileconfig" \
+       && ! -e "$UI_DIR/ios-intercept-ca.mobileconfig" ]] \
+        || fail "published Console generation is flat or incomplete"
+    current_ui_target="$(readlink -- "$UI_DIR/current")"
+    profiles_match_live_inputs() { return 0; }
+    publish_profiles || fail "matching profile inputs did not remain idempotent"
+    [[ "$(readlink -- "$UI_DIR/current")" == "$current_ui_target" ]] \
+        || fail "matching profile inputs needlessly switched Console current"
     current_before="$(readlink -- "$CERT_ROOT/dot/current")"
     current_name="${current_before#generations/}"
     mv -- "$CERT_ROOT/dot/generations/$current_name" \

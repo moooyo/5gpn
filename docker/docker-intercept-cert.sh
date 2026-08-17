@@ -96,72 +96,6 @@ owned_exact_line_file() {
 	printf '%s\n' "$value" | cmp -s - "$path"
 }
 
-ensure_owned_directory() {
-	local path="$1" mode="$2" parent actual_mode
-	local -a entries=()
-	if [[ ! -e "$path" && ! -L "$path" ]]; then
-        parent="$(dirname -- "$path")"
-        canonical_directory "$parent" \
-            && [[ "$(path_uid "$parent")" == "$EUID" \
-               && "$(path_gid "$parent")" == "$CURRENT_GID" ]] || return 1
-		mkdir -m "$mode" -- "$path" || return 1
-		fsync_directory "$parent" || return 1
-	fi
-	if owned_directory "$path" "$mode"; then
-		return 0
-	fi
-	if [[ "$mode" == 750 ]] && canonical_directory "$path" \
-	   && [[ "$(path_uid "$path")" == "$EUID" \
-	      && "$(path_gid "$path")" == "$CURRENT_GID" ]]; then
-		actual_mode="$(path_mode "$path")"
-		directory_entries "$path" entries || return 1
-		if [[ "$actual_mode" == 700 && "${#entries[@]}" == 0 ]]; then
-			chmod 0750 "$path" || return 1
-			fsync_directory "$path" || return 1
-		fi
-	fi
-	owned_directory "$path" "$mode"
-}
-
-write_marker_if_absent() {
-	local dir="$1" name="$2" value="$3" mode="$4" marker candidate entry tmp parent
-	local -a entries=()
-	marker="$dir/$name"
-	candidate="$dir/${name}.candidate"
-	if [[ ! -e "$marker" && ! -L "$marker" ]]; then
-		directory_entries "$dir" entries || return 1
-		for entry in "${entries[@]}"; do
-			[[ "$entry" == "$candidate" ]] || return 1
-		done
-		if [[ -e "$candidate" || -L "$candidate" ]]; then
-			owned_exact_line_file "$candidate" "$mode" "$value" || return 1
-		else
-			parent="$(dirname -- "$dir")"
-			tmp="$(mktemp "$parent/.5gpn-marker-stage.XXXXXX")" || return 1
-			printf '%s\n' "$value" > "$tmp" \
-				|| { rm -f -- "$tmp"; return 1; }
-			chmod "$mode" "$tmp" || { rm -f -- "$tmp"; return 1; }
-			owned_plain_file "$tmp" "$mode" \
-				|| { rm -f -- "$tmp"; return 1; }
-			fsync_file "$tmp" || { rm -f -- "$tmp"; return 1; }
-			directory_entries "$dir" entries \
-				|| { rm -f -- "$tmp"; return 1; }
-			[[ "${#entries[@]}" == 0 ]] \
-				|| { rm -f -- "$tmp"; return 1; }
-			mv -Tn -- "$tmp" "$candidate" || { rm -f -- "$tmp"; return 1; }
-			[[ ! -e "$tmp" && ! -L "$tmp" ]] \
-				|| { rm -f -- "$tmp"; return 1; }
-			fsync_directory "$dir" || return 1
-		fi
-		owned_exact_line_file "$candidate" "$mode" "$value" || return 1
-		mv -Tn -- "$candidate" "$marker" || return 1
-		[[ ! -e "$candidate" && ! -L "$candidate" ]] || return 1
-		fsync_directory "$dir" || return 1
-	fi
-	[[ ! -e "$candidate" && ! -L "$candidate" ]] \
-		&& owned_exact_line_file "$marker" "$mode" "$value"
-}
-
 file_sha256() {
     local digest rest
     read -r digest rest < <(sha256sum -- "$1") || return 1
@@ -289,10 +223,49 @@ recover_ca_publication() {
     return 2
 }
 
+ca_publication_is_recoverable_read_only() {
+    local live_cert="$CA_DIR/root.crt" live_key="$CA_DIR/root.key"
+    local new_cert="$CA_DIR/.root.crt.new" new_key="$CA_DIR/.root.key.new"
+    local cert_source="" key_source="" path name
+    local -a entries=()
+    directory_entries "$CA_DIR" entries || return 1
+    for path in "${entries[@]}"; do
+        name="$(basename -- "$path")"
+        case "$name" in
+            "$CA_MARKER"|root.crt|root.key|.root.crt.new|.root.key.new) ;;
+            *) return 1 ;;
+        esac
+    done
+    for path in "$live_cert" "$new_cert"; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        owned_plain_file "$path" 644 || return 1
+    done
+    for path in "$live_key" "$new_key"; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        owned_plain_file "$path" 600 || return 1
+    done
+    if [[ -e "$live_cert" && -e "$live_key" ]]; then
+        validate_ca_pair "$live_cert" "$live_key"
+        return
+    fi
+    [[ -e "$live_cert" ]] && cert_source="$live_cert"
+    [[ -z "$cert_source" && -e "$new_cert" ]] && cert_source="$new_cert"
+    [[ -e "$live_key" ]] && key_source="$live_key"
+    [[ -z "$key_source" && -e "$new_key" ]] && key_source="$new_key"
+    if [[ -n "$cert_source" || -n "$key_source" ]]; then
+        if [[ -e "$live_cert" || -e "$live_key" ]]; then
+            [[ -n "$cert_source" && -n "$key_source" ]] \
+                && validate_ca_pair "$cert_source" "$key_source"
+        else
+            return 0
+        fi
+    fi
+}
+
 ensure_intercept_layout() {
-    ensure_owned_directory "$INTERCEPT_DIR" 750 \
-        && write_marker_if_absent "$INTERCEPT_DIR" "$INTERCEPT_MARKER" "$INTERCEPT_MARKER_VALUE" 600 \
-        && ensure_owned_directory "$TLS_DIR" 750
+    owned_directory "$INTERCEPT_DIR" 750 \
+        && owned_exact_line_file "$INTERCEPT_DIR/$INTERCEPT_MARKER" 600 "$INTERCEPT_MARKER_VALUE" \
+        && owned_directory "$TLS_DIR" 750
 }
 
 tls_tree_safe() {
@@ -312,14 +285,53 @@ tls_tree_safe() {
     fi
 }
 
+intercept_publication_is_recoverable_read_only() {
+    local entry name size
+    local -a entries=()
+    owned_directory "$CA_DIR" 700 \
+        && owned_exact_line_file "$CA_DIR/$CA_MARKER" 644 "$CA_MARKER_VALUE" \
+        && ensure_intercept_layout \
+        && ca_publication_is_recoverable_read_only \
+        || return 1
+    directory_entries "$TLS_DIR" entries || return 1
+    for entry in "${entries[@]}"; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            leaf.crt|fullchain.pem|privkey.pem) owned_plain_file "$entry" 640 || return 1 ;;
+            .leaf.crt.new|.fullchain.pem.new|.privkey.pem.new) candidate_file_safe "$entry" || return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+    directory_entries "$INTERCEPT_DIR" entries || return 1
+    for entry in "${entries[@]}"; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            "$INTERCEPT_MARKER"|tls) ;;
+            cert-state) owned_plain_file "$entry" 640 || return 1 ;;
+            .cert-state.new) candidate_file_safe "$entry" || return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+    if [[ -e "$CERT_REQUEST" || -L "$CERT_REQUEST" ]]; then
+        [[ -f "$CERT_REQUEST" && ! -L "$CERT_REQUEST" \
+           && "$(path_uid "$CERT_REQUEST")" == "$EUID" \
+           && "$(path_gid "$CERT_REQUEST")" == "$CURRENT_GID" \
+           && "$(path_mode "$CERT_REQUEST")" == 644 \
+           && "$(path_nlink "$CERT_REQUEST")" == 1 ]] || return 1
+        size="$(path_size "$CERT_REQUEST")"
+        [[ "$size" =~ ^[0-9]+$ && "$size" -gt 0 && "$size" -le "$MAX_REQUEST_BYTES" ]] \
+            || return 1
+    fi
+}
+
 init_ca() {
     local stage recovery_rc=0
     canonical_directory /etc/5gpn \
         && [[ "$(path_uid /etc/5gpn)" == "$EUID" \
            && "$(path_gid /etc/5gpn)" == "$CURRENT_GID" ]] \
         || { err "The persistent /etc/5gpn root is unsafe or belongs to another identity."; return 1; }
-    ensure_owned_directory "$CA_DIR" 700 \
-        && write_marker_if_absent "$CA_DIR" "$CA_MARKER" "$CA_MARKER_VALUE" 644 \
+    owned_directory "$CA_DIR" 700 \
+        && owned_exact_line_file "$CA_DIR/$CA_MARKER" 644 "$CA_MARKER_VALUE" \
         && ensure_intercept_layout \
         || { err "The interception certificate directories are unsafe."; return 1; }
     recover_ca_publication || recovery_rc=$?
@@ -759,7 +771,7 @@ reconcile() {
 }
 
 main() {
-    [[ $# == 1 ]] || { err "Usage: $0 init-ca|reconcile"; return 2; }
+    [[ $# == 1 ]] || { err "Usage: $0 preflight|init-ca|reconcile"; return 2; }
     [[ "$EUID" == "$EXPECTED_UID" && "$CURRENT_GID" == "$EXPECTED_GID" ]] \
         || { err "Docker certificate helpers require fixed UID:GID 10001:10001."; return 1; }
     for command in openssl flock sha256sum sync cmp sort head find; do
@@ -768,9 +780,10 @@ main() {
     done
     ensure_lock || { err "Another certificate operation is running or the lock is unsafe."; return 1; }
     case "$1" in
+        preflight) intercept_publication_is_recoverable_read_only ;;
         init-ca) init_ca ;;
         reconcile) reconcile ;;
-        *) err "Usage: $0 init-ca|reconcile"; return 2 ;;
+        *) err "Usage: $0 preflight|init-ca|reconcile"; return 2 ;;
     esac
 }
 

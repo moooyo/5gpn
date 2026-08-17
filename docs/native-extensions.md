@@ -128,9 +128,17 @@ address must be globally routable, mixed public/private answers fail closed,
 and the accepted address is pinned for the outbound dial while the original
 hostname remains available to HTTP and TLS. Every request, including one that
 reuses a pooled connection, is re-authorized against the current protected-rule
-prefix before the extension's terminal egress binding is applied. Every
-upstream connection returns through mihomo's in-process inner dialer, current
-protected prefix, and reviewed terminal binding.
+prefix and the installation-owned gateway before the extension's terminal
+egress binding is applied. Every upstream connection returns through mihomo's
+in-process inner dialer, carrier-scoped gateway guard, current protected prefix,
+and reviewed terminal binding.
+
+The gateway check is dynamic core state, not a static rule rendered into the
+operator's mihomo YAML. It applies only to the private carrier attached to 5gpn
+system and extension tunnel egress. Ordinary client ingress and generic mihomo
+`INNER` traffic are not marked. DNS upstream members, subscription fetches, and
+manifest importer fetches use separate direct-socket clients and retain their
+own destination and redirect policies.
 
 A **resolver** form (`server:1.1.1.1`, up to four comma-separated specs) names
 nameservers rather than a destination. It changes where the monolith resolver
@@ -167,6 +175,14 @@ capture-DNS, and global routing precedence. Rules affect only traffic that
 reaches mihomo on the DNS-steering gateway; they cannot block a hard-coded IP
 path that bypasses it.
 
+These rules are part of the complete derived interception plan. A pending or
+failed interception certificate, or an unavailable fixed client boundary,
+withdraws both typed `reject` and `direct` decisions. HTTP(S) hosts already
+claimed for capture remain rejected before ordinary routing, while unrelated
+traffic receives no extension decision. Restoring certificate and boundary
+readiness restores the same typed rules without changing the interception
+revision or requiring another configuration write.
+
 Every installed extension has exactly one explicit operator egress binding.
 New imports receive `DIRECT` before they are persisted; an empty or unbound
 value is not representable. A manifest may declare
@@ -199,6 +215,56 @@ preserving execution order, bindings and type-compatible operator values.
 In-flight requests retain the old snapshot; later requests see the new one. A
 candidate that introduces an unconfigured required value or egress requirement
 is rejected before publication rather than disabling the extension implicitly.
+
+## Operator review contract
+
+The current `5gpn-interception` capability and operator review contract are both
+version 7. This is a control-plane version: the native manifest remains
+`5gpn.io/v1`, the Marketplace remains `5gpn.io/marketplace/v1`, and the current
+persisted `intercept.json` document remains version 6. Installed-extension
+details and install or Marketplace review candidates carry
+`review_contract: 7`.
+
+Each entry in a detail's `actions` array is a structured, bounded
+`ActionReview`. Common fields state the action ID, phase, host/scheme/method/path
+or status matchers, optional setting gate, action kind, body mode, timeout,
+maximum body size, and `review_digest`. Script actions add their entry and source
+form; scripts and JQ actions expose only a code SHA-256 and byte count, never the
+source text. Mock actions expose status and headers but represent the decoded
+body only by kind, byte count, and SHA-256. Header edits, URL rewrites, body
+replacement declarations, rejects, and their normalized parameters remain
+visible because they are the behavior the operator authorizes. Manifest bytes,
+script or JQ source text, and mock body bytes never appear in this projection.
+
+`review_digest` is deterministic over the complete executable declaration,
+including matcher and gate fields, limits, declarative parameters, and digests
+of hidden code or body bytes. The Console compares action IDs, digests, and
+sequence to show added, removed, changed, and reordered actions. It is a review
+identity, not an apply credential: candidate digest, selected Marketplace URL,
+document revision, and apply-time refetch remain independently required.
+
+The following confirmation-bearing writes require the exact value 7 and are
+rejected with HTTP 400 before persistence when it is missing, stale, or future:
+
+1. fresh URL or local install apply;
+2. Marketplace update apply;
+3. complete execution-order replacement; and
+4. enabling an extension.
+
+Disabling may omit `review_contract` so an operator can always revoke an
+authorization. Missing, null, and zero are the same absent value for this safe
+escape hatch; a nonzero stale or future version is rejected. The Console accepts
+a review detail only when its returned number equals the Console's compiled-in
+constant, and every protected request sends that local constant rather than
+echoing the returned number. A mismatch hides the action cards, leaves confirm
+unavailable, and produces no mutation request. If a stale tab nevertheless
+sends its old constant after a core upgrade, the core rejects it.
+
+Version 7 adds no persisted authorization epoch. A current-schema snapshot that
+was already enabled remains enabled when the new core loads it; the upgrade does
+not synthesize a confirmation or disable extensions. Its next protected
+install, update, reorder, or enable operation uses the v7 gate. After an operator
+disables it without a contract, enabling it again requires the current contract.
 
 ## Network permission
 
@@ -256,8 +322,8 @@ controller rule-management API refuses to disable it. A fallback-capable client 
 retry over TCP and enter the normal capture path. An H3-only client fails.
 
 This guard covers only UDP destination port 443 that reaches the gateway. It
-does not disable ordinary UDP forwarding or QUIC sniffing on other configured
-ports such as `:5060`, and it is not a host firewall.
+does not disable ordinary UDP forwarding or QUIC sniffing on other explicitly
+operator-configured ports, and it is not a host firewall.
 
 ## Typed settings
 

@@ -4,6 +4,20 @@ Docker is an alternative packaging and lifecycle for the same 5gpn monolith.
 It is one image, one container, and one Compose service. DNS, forwarding,
 Console, Telegram, and native extensions are not split into sidecars.
 
+## Publication status
+
+The merged root implementation requires the exact offline Core handshake
+`5gpn-container-runtime-v2`. The current `release/pins.env` still names Core
+`.32`, which does not implement v2. Deployment-neutral Zashboard setup wording
+exists on its maintenance branch but has not yet been published or pinned.
+Consequently no current tag is a supported Docker v2 release and the image
+publication gate is expected to fail closed.
+
+Do not weaken the handshake or use a development binary in a release image.
+This runbook describes the v2 delivery that becomes usable only after immutable
+compatible Core and Console releases are recorded together in
+`release/pins.env` and the exact image passes release-mode acceptance.
+
 ## Supported host
 
 The first Docker release supports only:
@@ -21,9 +35,9 @@ exits before listeners open if delegation is not usable.
 
 ## Obtain the launch files
 
-Every GitHub Release still has exactly three assets. The existing installer
-archive also carries the Docker launch files, while the image itself is
-published only through GHCR:
+Every GitHub Release remains exactly three assets. The installer archive also
+carries the tagged Docker launch files, while the matching image is a separate
+GHCR artifact:
 
 ```bash
 TAG=X.Y.Z
@@ -37,22 +51,22 @@ cd "5gpn-${TAG}"
 
 The required local launch inputs are `compose.yaml`,
 `docker/seccomp-5gpn.json`, and `docker/bootstrap/config.env.example`. Do not
-download those files from a branch while running a tagged image.
-The GitHub release body records the matching `ghcr.io/moooyo/5gpn:<tag>` OCI
-digest when an immutable digest reference is preferred.
+mix files from a branch with a tagged image. Image assembly reads the same
+bound `release/pins.env` through `release/pins.sh`; there is no Docker-only
+component lock.
 
 ## Configure
 
 Copy the bootstrap template and set the base domain, the client-routable
 gateway IPv4, and the Let's Encrypt email. Container listeners are fixed at
-`0.0.0.0`; the public and gateway addresses are deployment identity, not
-container-interface bind targets. Docker accepts Cloudflare DNS-01 only. Keep
-`CERT_MODE=cloudflare`; `http-01`, `debug`, and unknown values are rejected.
+`0.0.0.0`; public and gateway addresses are deployment identity, not
+container-interface bind targets. Docker accepts Cloudflare DNS-01 only.
 
-Set `DNS_MIHOMO_SECRET` to a new value matching
-`[A-Za-z0-9._~-]{16,256}` before first start.
-If it is omitted, bootstrap generates one and persists it in
-`/etc/5gpn/dns.env` inside the volume. Treat both forms as credentials.
+Do not add a controller secret to the bootstrap file. On a fresh v2 volume,
+bootstrap generates a random secret once and writes it only into the complete
+operator-owned `/etc/5gpn/mihomo/config.yaml`. Durable `/etc/5gpn/dns.env`
+contains exactly six installation coordinates and never contains the secret,
+listener paths, certificate paths, policy, or runtime tuning.
 
 ```bash
 cp docker/bootstrap/config.env.example docker/bootstrap/config.env
@@ -68,22 +82,22 @@ sudo chmod 0600 \
 ```
 
 The Cloudflare file contains the raw API token and nothing else. Use a token
-scoped to `Zone:DNS:Edit` for the selected zone. The fixed numeric identity
-`10001:10001` is both the container runtime identity and the persistent-volume
-ABI; changing it prevents safe cgroup delegation and state reuse.
+scoped to `Zone:DNS:Edit` for the selected zone. Fixed identity
+`10001:10001` owns the process, delegated cgroup, and both persistent-volume
+ABIs.
 
 DNS-01 creates only temporary ACME TXT records. Before client enrollment, the
 operator must publish `console.<base>` and `dot.<base>` A records that resolve
-to `DNS_PUBLIC_IP` (which defaults to `DNS_GATEWAY_IP` when no separate public
-identity is needed); the container does not create or maintain those A records.
+to `DNS_PUBLIC_IP`, which defaults to `DNS_GATEWAY_IP` when no separate public
+identity is needed. The container does not create or maintain those A records.
 The Docker data plane is IPv4-only.
 
 ## Start
 
-Confirm the host boundary, then use the exact image tag matching the release
-bundle. Compose requires `FIVEGPN_IMAGE` and has no movable default. Stable
-publication also updates the convenience alias `latest`, while beta never does;
-using that alias is an explicit choice outside the tagged-bundle default.
+After a v2-compatible tag has been published, confirm the host boundary and use
+the exact image tag matching the release bundle. Compose requires
+`FIVEGPN_IMAGE` and has no movable default. Stable publication may update the
+convenience alias `latest`; beta never does.
 
 ```bash
 docker version --format '{{.Server.Version}}'
@@ -95,145 +109,180 @@ docker compose up -d gateway
 docker compose logs -f gateway
 ```
 
-Bootstrap creates or validates the interception CA, obtains one public Certbot
-lineage for `<base>` and `*.<base>`, publishes the `dot` and `console` roles,
-copies the pinned Console into tmpfs, validates the complete mihomo
-configuration, and finally `exec`s `5gpn-mihomo` as PID 1. ACME issuance
-failure is retried with bounded backoff; structural, permission, lineage, and
-publication failures stop that attempt immediately without repairing or
-partially trusting state. Because Compose uses `restart: unless-stopped`, a
-deterministic error will retry the whole container until the operator stops it
-and fixes the input; restart is crash recovery, not configuration repair.
+Bootstrap first verifies the exact runtime-v2 handshake, then locks both named
+volumes for the container lifetime. It accepts only the exact six-key
+`dns.env`, validates existing operator YAML through owner-scoped
+`5gpn-config inspect-controller --owner-uid` v2, and validates
+`dns.json`, `intercept.json`, and `bot.json` through
+`5gpn-state validate --owner-uid`. Shell code does not maintain a second
+decoder for those Core-owned documents.
+
+Bootstrap then initializes or validates the interception CA, obtains one
+Cloudflare Certbot lineage for `<base>` and `*.<base>`, publishes the `dot` and
+`console` roles, and publishes the pinned Console plus both signed profiles as
+one complete `/opt/5gpn/ui/current` generation. Finally it validates the whole
+Mihomo configuration and `exec`s `5gpn-mihomo` as PID 1.
+
+ACME issuance failure is retried with bounded backoff. Structural, permission,
+lineage, volume, document, and publication failures stop that attempt without
+silently repairing or adopting state. Because Compose uses
+`restart: unless-stopped`, a deterministic error retries the whole container
+until the operator stops it and fixes the input. Restart is crash recovery, not
+configuration repair.
 
 The persistent `.5gpn-docker-lineage-ready` marker is the first complete public
-lineage commit fence and binds the base domain. Before that fence, bootstrap may
-clean only marker-owned first-boot partials and preserves ACME accounts. After
-the fence, an invalid current lineage is restored only from a validated complete
-generation or fails closed; it is never reset silently. Role generation cleanup
-uses `.delete.generation-*` tombstones before deletion.
+lineage commit fence and binds the base domain. Before that fence, bootstrap
+may clean only marker-owned first-boot partials and preserves ACME accounts.
+After the fence, an invalid lineage is restored only from a validated complete
+generation or fails closed.
 
-Compose uses an IPv4-only bridge network and explicitly publishes `853/tcp`, `80/tcp`,
-`443/tcp+udp`, `5060/tcp+udp`, `8080/tcp`, and `8443/tcp` on the Docker host.
-These host ports must be free before startup. Every mapping binds the host's
-IPv4 wildcard `0.0.0.0` explicitly, so an IPv6-enabled Docker daemon does not
-also publish the service on `::`. Compose does not publish plain DNS 53, debug
-DNS 5353, the origin resolver 5354, or the container's internal controller port
-443. Restrict public ingress with an independently managed firewall or cloud
-security group because 5gpn does not manage one.
+## Published ports
 
-The 443 mapping targets the Docker-only data-plane socket
+Compose uses an IPv4-only bridge and publishes only:
+
+| Host mapping | Purpose |
+|---|---|
+| `0.0.0.0:853:853/tcp` | The only client DNS ingress, DoT. |
+| `0.0.0.0:80:80/tcp` | DNS-steered plain HTTP. |
+| `0.0.0.0:443:9443/tcp` | DNS-steered TLS/H1/H2 data plane. |
+| `0.0.0.0:443:9443/udp` | Gateway UDP/443 reaches the fixed global reject so fallback-capable clients may retry TCP. |
+| `0.0.0.0:8080:8080/tcp` | Explicit alternate HTTP/TLS ingress. |
+| `0.0.0.0:8443:8443/tcp` | Explicit alternate HTTP/TLS ingress. |
+
+There is no product `:5060` listener. Compose does not publish plain DNS 53,
+debug DNS 5353, the origin resolver 5354, or the internal controller port 443.
+Every mapping binds the host's IPv4 wildcard explicitly, so an IPv6-enabled
+daemon does not also publish it on `::`.
+
+The public 443 mapping targets the Docker-only data-plane socket
 `0.0.0.0:9443`. The tunnel still targets `console.<base>:443`, and the internal
-controller remains `127.0.0.1:443`, so public and sniffed destination semantics
-stay on port 443. The translated container port exists only to avoid binding a
-wildcard `:443` tunnel over that loopback controller. Every other published
-port maps to the same container port.
+controller remains `127.0.0.1:443`, preserving public and sniffed destination
+semantics. Restrict public ingress with an independently managed firewall or
+cloud security group because 5gpn does not manage one.
 
-## Runtime and persistence
+## Persistence and v1 rejection
 
-The only durable volume is `fivegpn-data:/etc/5gpn`. It contains operator YAML,
-monolith documents, the ACME account and lineage, public certificate roles, and
-the interception CA and leaf. The image root is read-only; `/run`, scratch
-directories, and `/opt/5gpn/ui` are tmpfs.
-Compose fixes the engine-level volume name to `fivegpn-data` so moving the
-launch directory does not create an apparently empty gateway. An operator may
-set `FIVEGPN_DATA_VOLUME` to another stable name deliberately; that name must be
-kept for every later invocation.
+Docker v2 has exactly two durable volumes:
 
-The Compose contract drops every capability and uses the bridge network's
-namespaced `net.ipv4.ip_unprivileged_port_start=0` so fixed UID 10001 can bind
-the low container ports without `NET_BIND_SERVICE`. It also uses
-`no-new-privileges`, a private cgroup namespace, Docker 28's
-`writable-cgroups=true`, and the shipped clone3-aware seccomp profile. It does
-not use `privileged`, `SYS_ADMIN`, an unconfined profile, the Docker socket, or
-a host cgroup bind mount.
+| Volume | Mount | Contents |
+|---|---|---|
+| `fivegpn-data` | `/etc/5gpn` | Operator YAML, six-key `dns.env`, Core documents, ACME account and lineage, public certificate roles, interception CA and leaf, and ownership markers. |
+| `fivegpn-ui` | `/opt/5gpn/ui` | The owned generation root, `current` symlink, Console bytes, compatibility manifests, and both signed profiles. |
 
-To display an automatically generated controller secret, use an interactive
-terminal and protect its scrollback:
+Compose fixes the engine-level names so moving the launch directory does not
+create an apparently empty gateway. An operator may deliberately set
+`FIVEGPN_DATA_VOLUME` and `FIVEGPN_UI_VOLUME`, but both names must remain stable
+for every later invocation. Two different containers cannot share either live
+volume; startup takes a non-blocking lifetime lock on both.
+
+The image root is read-only. `/run/5gpn`, `/run/5gpn-bootstrap`, `/tmp`, and
+`/var/tmp` are tmpfs. The UI is not tmpfs: its complete generation tree is
+durable and independently validated before listeners open.
+
+A data volume produced by the retired container-runtime-v1 layout is rejected
+unchanged. Extra `dns.env` keys, a secret mirrored outside `config.yaml`, old
+document schemas, retired paths, and a flat UI tree are hard errors. There is
+no in-place migration, compatibility alias, or automatic adoption. Preserve or
+back up the old volume outside the installer, then start v2 with explicitly new
+data and UI volume names if a fresh deployment is intended.
+
+Never run `docker compose down -v` unless deletion of both volumes, including
+operator configuration, ACME identity, private CA, Console generations, and
+signed profiles, is intentional.
+
+## Controller secret
+
+The secret is generated only for a fresh operator YAML. To display it, protect
+the terminal and its scrollback, then run the same owner-scoped Core inspector
+used by bootstrap:
 
 ```bash
-docker compose exec gateway grep '^DNS_MIHOMO_SECRET=' /etc/5gpn/dns.env
+docker compose exec -T gateway /bin/sh -ec '
+  /opt/5gpn/bin/5gpn-mihomo 5gpn-config inspect-controller \
+    --owner-uid 10001 --config /etc/5gpn/mihomo/config.yaml \
+    | jq -r .secret
+'
 ```
 
-To update, set `FIVEGPN_IMAGE` to the new exact tag and run `pull` followed by
-`up -d` again. Back up the named volume while the gateway is stopped. Never run
-`docker compose down -v` unless deleting the operator configuration, ACME
-identity, public certificates, and interception CA is intentional.
+Do not parse YAML with `grep`, copy the secret into `dns.env`, or place it in a
+Compose environment variable.
 
-After changing the Cloudflare token file, restart or recreate the gateway so
-the entrypoint can copy the new credential into tmpfs. Certificate renewal and
-interception-leaf publication otherwise hot-apply without restarting mihomo.
+## Runtime and security boundary
 
-## Process and key boundary
+The Compose contract drops every capability and uses the bridge network's
+namespaced `net.ipv4.ip_unprivileged_port_start=0` so UID 10001 can bind low
+ports without `NET_BIND_SERVICE`. It also uses `no-new-privileges`, a private
+cgroup namespace, Docker 28 writable-cgroup delegation, and the shipped
+clone3-aware seccomp profile. It does not use `privileged`, `SYS_ADMIN`, an
+unconfined profile, the Docker socket, or a host cgroup bind mount.
 
-`5gpn-mihomo` is the sole long-running process. Initial certificate/bootstrap
-commands and runtime renewal/reconciliation commands are trusted short-lived
-children; every one is waited, and runtime helpers are terminated as a process
-group during shutdown. `/restart`, SIGTERM, and a fatal runtime invariant all
-take the complete orderly shutdown path, after which Docker's
-`restart: unless-stopped` policy replaces the container.
+`5gpn-mihomo` is the sole long-running process. Initial bootstrap commands and
+runtime certificate reconciliation commands are trusted short-lived children;
+every one is waited, and runtime helpers are terminated as a process group
+during shutdown. `/restart`, SIGTERM, and fatal runtime invariants converge on
+the same orderly whole-process shutdown. Compose grants 45 seconds before
+forced termination, after which `restart: unless-stopped` may replace the
+container.
 
-This simplified form deliberately has weaker certificate-key isolation than the
-host/systemd installation. The same `fivegpn` identity can read the Cloudflare
-credential, ACME account, public private keys, and interception CA private key.
-There is no sidecar or namespace boundary between those trusted materials.
-Untrusted extension execution remains separate: each operation uses a fresh
-same-binary worker born atomically in its bounded cgroup leaf, and startup fails
-if that isolation cannot be established.
+This simplified form deliberately has weaker certificate-key isolation than
+the host/systemd installation. The same `fivegpn` identity can read the
+Cloudflare credential, ACME account, public private keys, and interception CA
+private key. There is no sidecar or namespace boundary between those trusted
+materials. Untrusted extension execution remains separate: every operation
+uses a fresh same-binary worker born atomically in a bounded cgroup leaf, and
+startup fails if that isolation cannot be established.
+
+## Update a v2 deployment
+
+Set `FIVEGPN_IMAGE` to the new exact tag and run `pull` followed by `up -d`.
+Keep both volume names unchanged. Back up both volumes while the gateway is
+stopped. After changing the Cloudflare token file, recreate or restart the
+gateway so bootstrap copies the new credential into tmpfs. Certificate renewal,
+role publication, and UI/profile generation otherwise hot-apply without
+restarting Mihomo.
 
 ## Release acceptance
 
 GitHub-hosted CI prepares the verified component pins, builds the image, and
 performs static inspection only. It cannot prove writable-cgroup delegation.
 Maintainers run [`tests/container-acceptance.sh`](../tests/container-acceptance.sh)
-against the exact candidate on `test-env` with Docker Engine 28. That manual
-gate covers authenticated capabilities, a real extension operation, worker OOM
-containment, certificate hot publication, container recreation, and named-volume
-persistence. Its extension/OOM, certificate, and transactional-recreate probes
-are the reviewed files under `tests/docker`; the driver refuses symlinks or a
-missing probe and prints a digest over the exact commit, Compose contract,
-seccomp profile, driver, and probe files. There is no site-owned executable
-callback. A hosted-runner substitute or an incomplete probe bundle is not an
-accepted result.
-The candidate is built with the release workflow's pinned BuildKit image,
-peeled commit revision, `SOURCE_DATE_EPOCH`, and
-`rewrite-timestamp=true`; a plain development `docker build` does not produce
-the accepted release image ID.
+against the exact candidate on a disposable Docker Engine 28 target reached
+through `test-env`. The working gateway is authorized only for read-only
+deployment smoke and must not receive recreation, OOM injection, certificate
+mutation, or other Docker acceptance writes.
 
-Run the command on the host whose hostname is exactly `test-env`, from the
-exact candidate checkout. The driver verifies that `HEAD` is the requested
-commit and that every tracked installer-pin, Compose, seccomp, driver, and
-probe input still matches that commit; a copied or locally edited probe tree is not release
-evidence. Release mode is the default and accepts only an image whose component
-manifest says `pinned-release`. After the exact commit and
-pinned artifact pass, a repository administrator
-records all three coordinates. Release refuses to publish when any variable is
-missing or stale:
+The release-mode driver binds its Git root and `HEAD`, `release/pins.env`, the
+Compose and seccomp contracts, the acceptance driver and probes, the compressed
+Core artifact digest, and the exact image ID. A copied, dirty, or weakened
+harness cannot produce release evidence by repeating an expected commit string.
+
+After compatible Core and Console releases have been pinned, the evidence flow
+is:
 
 ```bash
 accepted_commit="$(git rev-parse HEAD)"
-accepted_mihomo_sha="$(sed -n 's/^MIHOMO_SHA256="\([0-9a-f]*\)".*/\1/p' install.sh)"
+accepted_mihomo_sha="$(sed -n 's/^MIHOMO_SHA256=//p' release/pins.env)"
 accepted_container=FIVEGPN_ACCEPTED_CONTAINER
 evidence="container-acceptance-${accepted_commit}.log"
+
 set -o pipefail
 FIVEGPN_ACCEPTANCE_HOST=test-env \
+FIVEGPN_ACCEPTANCE_TARGET=disposable \
 FIVEGPN_EXPECTED_COMMIT="$accepted_commit" \
 FIVEGPN_EXPECTED_MIHOMO_SHA256="$accepted_mihomo_sha" \
 FIVEGPN_CAPABILITIES_URL=https://console.example.com/capabilities \
 FIVEGPN_CONTROLLER_SECRET_FILE=/root/acceptance/controller-secret \
   bash tests/container-acceptance.sh "$accepted_container" \
   | tee "$evidence"
-accepted_image_id="$(sed -n 's/^FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID=//p' "$evidence")"
-gh variable set FIVEGPN_CONTAINER_ACCEPTED_COMMIT --body "$accepted_commit"
-gh variable set FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256 --body "$accepted_mihomo_sha"
-gh variable set FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID --body "$accepted_image_id"
 ```
 
-An explicitly selected `FIVEGPN_ACCEPTANCE_MODE=development` accepts only a
-`development-local` image and requires its exact uncompressed mihomo binary
-digest plus an explicit loopback high-port map. It emits only
-`FIVEGPN_CONTAINER_DEVELOPMENT_ACCEPTED_*` values, which cannot satisfy the
-release variables above. `tests/container-acceptance.sh --help` lists those
-development-only inputs and the optional narrow CA/hostname-resolution inputs.
+Only the exact release-mode output may populate:
 
-These variables are evidence selectors, not a substitute for retaining the
-test-env command output with the release record.
+- `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`;
+- `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`; and
+- `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID`.
+
+The release workflow rebuilds the image and requires the resulting image ID to
+equal the accepted value before publishing the exact GHCR tag. Stable `latest`
+moves only after the GitHub Release is immutable. Historical development-mode
+evidence cannot satisfy this gate.

@@ -45,6 +45,17 @@ grep -Fxq 'ProtectProc=invisible' "$SVC" || fail "5gpn-mihomo.service can enumer
 grep -Fxq 'RestrictSUIDSGID=yes' "$SVC" || fail "5gpn-mihomo.service can create setuid files"
 grep -Fq 'ExecStart=/opt/5gpn/bin/5gpn-mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' "$SVC" \
     || fail "5gpn-mihomo.service: unexpected ExecStart"
+grep -Fxq 'ExecStartPre=+/opt/5gpn/scripts/configure-runtime-gate.sh wait' "$SVC" \
+    || fail "5gpn-mihomo.service lacks the root-only PID1 restart gate"
+grep -Fxq 'ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui' "$SVC" \
+    || fail "5gpn-mihomo.service does not validate the current UI generation before listeners start"
+gate_line="$(grep -nF 'ExecStartPre=+/opt/5gpn/scripts/configure-runtime-gate.sh wait' "$SVC" | cut -d: -f1)"
+ui_line="$(grep -nF 'ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui' "$SVC" | cut -d: -f1)"
+[[ -n "$gate_line" && -n "$ui_line" && "$gate_line" -lt "$ui_line" \
+   && "$(grep -c '^ExecStartPre=+' "$SVC")" == 1 ]] \
+    || fail "only the first configure gate may use systemd's privileged exec prefix"
+grep -Fxq 'TimeoutStartSec=40min' "$SVC" \
+    || fail "the service start timeout cannot cover the bounded configure gate"
 grep -Eq '^RuntimeDirectory=' "$SVC" \
     && fail "5gpn-mihomo.service must not own the root certificate-lock directory"
 
@@ -148,8 +159,9 @@ grep -Fq 'systemctl start 5gpn-mihomo.service' <<<"$start_fn" \
 # The published asset is the compressed one, so that is what the pin covers.
 # Checking the unpacked binary instead would verify something gzip produced
 # rather than something the release published.
-grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/mihomo.gz" "$MIHOMO_SHA256"' "$INSTALL" \
-    || fail "no mandatory checksum verification for the one binary's published asset"
+grep -Fq 'mihomo_sha="$(release_artifact_sha256 mihomo)"' "$INSTALL" \
+    && grep -Fq 'verify_sha256 "$ARTIFACT_STAGE/mihomo.gz" "$mihomo_sha"' "$INSTALL" \
+    || fail "no mandatory centralized checksum verification for the one binary's published asset"
 
 # The polkit rule authorized one service user to restart another's unit. With
 # one unit there is no such relationship, and a rule granting a network-facing

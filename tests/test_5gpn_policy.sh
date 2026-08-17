@@ -4,9 +4,6 @@
 # the installer seeds and refreshes the one live DNS document, preserves its
 # operator-owned fields, and does not recreate a standalone DNS service.
 #
-# Legacy dns.env values may be read once while creating a missing document.
-# They are migration input, not a second live resolver configuration surface.
-#
 # Pure grep — runs on the dev box under Git Bash, no Linux/Python needed.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$HERE/.."
@@ -20,10 +17,11 @@ grep -Fq 'moooyo/5gpn' "$INSTALL" \
 
 seed_dns_fn="$(sed -n '/^seed_dns_document()/,/^}/p' "$INSTALL")"
 render_dns_fn="$(sed -n '/^render_fresh_dns_document()/,/^}/p' "$INSTALL")"
+compat_dns_fn="$(sed -n '/^current_dns_document_is_compatible()/,/^}/p' "$INSTALL")"
 write_dns_env_fn="$(sed -n '/^write_dns_env()/,/^}/p' "$INSTALL")"
-full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 [[ -n "$seed_dns_fn" ]] || fail "install.sh: seed_dns_document() is missing"
 [[ -n "$render_dns_fn" ]] || fail "install.sh: render_fresh_dns_document() is missing"
+[[ -n "$compat_dns_fn" ]] || fail "install.sh: current DNS compatibility validator is missing"
 [[ -n "$write_dns_env_fn" ]] || fail "install.sh: write_dns_env() is missing"
 
 # --- dns.json is the sole live resolver document ---
@@ -31,11 +29,12 @@ grep -Fq 'FIVEGPN_STATE_DIR="/etc/5gpn/mihomo/5gpn"' "$INSTALL" \
     || fail "install.sh: monolith state directory is not /etc/5gpn/mihomo/5gpn"
 printf '%s' "$seed_dns_fn" | grep -Fq 'target="${state_dir}/dns.json"' \
     || fail "seed_dns_document does not target the monolith DNS document"
-printf '%s' "$seed_dns_fn" | grep -Fq 'dot="${dot:-:853}"' \
-    || fail "fresh DNS document does not default client ingress to DoT :853"
-printf '%s' "$seed_dns_fn" | grep -Fq 'debug="${debug:-127.0.0.1:5353}"' \
-    || fail "fresh DNS document does not keep debug DNS on loopback :5353"
-printf '%s' "$render_dns_fn" | grep -Fq -- '--arg dot "$dot" --arg debug "$debug" --arg origin "127.0.0.1:5354"' \
+printf '%s' "$seed_dns_fn" | grep -Fq 'dot="$DOT_LISTEN_ADDR" debug="$DEBUG_LISTEN_ADDR"' \
+    && grep -Fq 'DOT_LISTEN_ADDR=":853"' "$INSTALL" \
+    && grep -Fq 'DEBUG_LISTEN_ADDR="127.0.0.1:5353"' "$INSTALL" \
+    || fail "fresh DNS document does not use the fixed DoT/debug listener constants"
+printf '%s' "$render_dns_fn" | grep -Fq -- '--arg dot "$dot" --arg debug "$debug" --arg origin "$ORIGIN_LISTEN_ADDR"' \
+    && grep -Fq 'ORIGIN_LISTEN_ADDR="127.0.0.1:5354"' "$INSTALL" \
     || fail "fresh DNS document does not pin the origin resolver to loopback :5354"
 printf '%s' "$render_dns_fn" | grep -Fq 'certificate: $cert, privateKey: $key' \
     || fail "fresh DNS document does not carry the installer-owned DoT keypair"
@@ -76,19 +75,70 @@ if command -v jq >/dev/null 2>&1; then
         and .policy.fallback == "auto"
         and .tuning == {}
     ' >/dev/null || fail "fresh DNS renderer produced an invalid document"
+
+    safe_numbers="$(mktemp "${TMPDIR:-/tmp}/5gpn-dns-safe-numbers.XXXXXX")"
+    unsafe_numbers="$(mktemp "${TMPDIR:-/tmp}/5gpn-dns-unsafe-numbers.XXXXXX")"
+    printf '%s\n' '{"intervalSeconds":9007199254740991}' > "$safe_numbers"
+    printf '%s\n' '{"intervalSeconds":9007199254740993}' > "$unsafe_numbers"
+    (
+        export INSTALL_SH_LIB_ONLY=1
+        # shellcheck source=../install.sh
+        source "$INSTALL"
+        dns_document_is_jq_gateway_update_safe "$safe_numbers" \
+            && ! dns_document_is_jq_gateway_update_safe "$unsafe_numbers"
+    ) || fail "gateway-only updater accepts a number jq cannot preserve exactly"
+    rm -f -- "$safe_numbers" "$unsafe_numbers"
 fi
 
-# Reinstall refreshes only installation-owned fields. Policy, upstreams,
-# listener addresses, and tuning remain the operator's current document.
-for assignment in \
-    '.listen.certificate = $cert' \
-    '.listen.privateKey = $key' \
-    '.gateway = $gw'; do
-    printf '%s' "$seed_dns_fn" | grep -Fq "$assignment" \
-        || fail "existing DNS document does not refresh $assignment"
+# Reinstall validates all fixed listener/key coordinates and updates only the
+# separately checked installation-owned gateway. Drift fails closed instead of
+# being repaired by an implicit rewrite.
+for check in \
+    '.listen.dot == $dot' \
+    '.listen.debug == $debug' \
+    '.listen.origin == $origin' \
+    '.listen.certificate == $cert' \
+    '.listen.privateKey == $key'; do
+    printf '%s' "$compat_dns_fn" | grep -Fq "$check" \
+        || fail "current DNS compatibility validation is missing $check"
 done
+printf '%s' "$compat_dns_fn" | grep -Eq '\.(upstreams|policy|tuning)' \
+    && fail "current DNS compatibility helper duplicates Core-owned schema validation"
+[[ "$(printf '%s' "$seed_dns_fn" | grep -Fc 'current_dns_document_is_compatible')" -ge 2 ]] \
+    || fail "DNS seeding does not validate both the live document and gateway-update candidate"
+printf '%s' "$seed_dns_fn" | grep -Fq 'VALIDATED_DNS_SOURCE_REVISION' \
+    && printf '%s' "$seed_dns_fn" | grep -Fq 'DNS document changed while its gateway update was staged.' \
+    || fail "DNS publication is not bound to the pre-publication Core-validated source revision"
+printf '%s' "$seed_dns_fn" | grep -Fq 'validate_dns_candidate_with_staged_core "$tmp"' \
+    || fail "actual DNS publication candidates are not revalidated by the staged Core"
+quiescent_line="$(grep -n 'assert_dns_publication_quiescent' <<<"$seed_dns_fn" | head -1 | cut -d: -f1)"
+quiesced_validate_line="$(grep -n 'validate_existing_runtime_documents' <<<"$seed_dns_fn" | head -1 | cut -d: -f1)"
+existing_line="$(grep -nF 'if [[ -f "$target" ]]' <<<"$seed_dns_fn" | head -1 | cut -d: -f1)"
+[[ -n "$quiescent_line" && -n "$quiesced_validate_line" && -n "$existing_line" \
+   && "$quiescent_line" -lt "$quiesced_validate_line" \
+   && "$quiesced_validate_line" -lt "$existing_line" ]] \
+    || fail "runtime documents are not revalidated by the staged Core after writer quiescence"
+full_install_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
+account_line="$(grep -n '^[[:space:]]*install_service_accounts' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
+seed_line="$(grep -n '^[[:space:]]*seed_dns_document' <<<"$full_install_fn" | head -1 | cut -d: -f1)"
+[[ -n "$account_line" && -n "$seed_line" && "$account_line" -lt "$seed_line" ]] \
+    || fail "DNS publication can run before the service-account quiescence transaction"
+validate_runtime_fn="$(sed -n '/^validate_existing_runtime_documents()/,/^}/p' "$INSTALL")"
+printf '%s' "$validate_runtime_fn" | grep -Fq 'VALIDATED_DNS_SOURCE_REVISION="$dns_revision_after"' \
+    && printf '%s' "$validate_runtime_fn" | grep -Fq 'current_dns_document_is_compatible "$dns_document"' \
+    || fail "staged Core validation does not publish the exact DNS source revision dependency"
+stage_fn="$(sed -n '/^stage_artifacts()/,/^}/p' "$INSTALL")"
+printf '%s' "$stage_fn" | grep -Fq 'state-seed-probe' \
+    && printf '%s' "$stage_fn" | grep -Fq 'Staged mihomo rejected the DNS document seed' \
+    || fail "fresh DNS seed is not validated by the staged pinned Core before publication"
+printf '%s' "$seed_dns_fn" | grep -Fq "'.gateway == \$gw'" \
+    || fail "unchanged current DNS documents are not preserved byte-for-byte"
+printf '%s' "$seed_dns_fn" | grep -Fq "'.gateway = \$gw'" \
+    || fail "existing DNS document does not update the checked gateway"
 printf '%s' "$seed_dns_fn" | grep -Eq '\.listen\.(dot|debug|origin)[[:space:]]*=' \
     && fail "reinstall rewrites an operator-owned DNS listener address"
+printf '%s' "$seed_dns_fn" | grep -Eq '\.listen\.(certificate|privateKey)[[:space:]]*=' \
+    && fail "reinstall silently rewrites a drifted DoT key path"
 printf '%s' "$seed_dns_fn" | grep -Eq '\.(upstreams|policy|tuning)[[:space:]]*=' \
     && fail "reinstall rewrites operator-owned live DNS settings"
 
@@ -100,17 +150,10 @@ printf '%s' "$seed_dns_fn" | grep -Fq 'chmod 0600 "$tmp"' \
 printf '%s' "$seed_dns_fn" | grep -Fq 'mv -Tf -- "$tmp" "$target"' \
     || fail "DNS document is not published by same-directory atomic rename"
 
-# A missing document is seeded before dns.env is rewritten, so exact retired
-# upstream values can be consumed once and then dropped from the current file.
-printf '%s' "$seed_dns_fn" | grep -Fq 'cfg_get DNS_CHINA' \
-    || fail "first seed no longer carries the legacy China upstream input"
-printf '%s' "$seed_dns_fn" | grep -Fq 'cfg_get DNS_TRUST' \
-    || fail "first seed no longer carries the legacy trust upstream input"
-seed_call_line="$(printf '%s\n' "$full_install_fn" | grep -nE '^[[:space:]]*seed_dns_document([[:space:]]|$)' | cut -d: -f1)"
-env_call_line="$(printf '%s\n' "$full_install_fn" | grep -nE '^[[:space:]]*write_dns_env([[:space:]]|$)' | cut -d: -f1)"
-if [[ -z "$seed_call_line" || -z "$env_call_line" || "$seed_call_line" -ge "$env_call_line" ]]; then
-    fail "full_install must seed dns.json before rewriting migration inputs in dns.env"
-fi
+# Fresh state is rendered only from current installation inputs. Retired
+# resolver-group keys are neither consumed nor persisted.
+printf '%s' "$seed_dns_fn" | grep -Eq 'cfg_get DNS_(CHINA|TRUST)' \
+    && fail "fresh DNS seeding still consumes retired dns.env resolver groups"
 printf '%s\n' "$write_dns_env_fn" | grep -Eq '^[[:space:]]*DNS_(CHINA|TRUST)=' \
     && fail "write_dns_env still persists retired resolver-group keys"
 
@@ -126,8 +169,6 @@ printf '%s' "$write_dns_env_fn" | grep -Fq 'mv -f -- "$dns_env_tmp" "${CONF_DIR}
     || fail "dns.env is not atomically published"
 
 # --- Explicit retired-input and removed-component guards ---
-grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL" \
-    || fail "install.sh: retired DNS_EGRESS_RESOLVER is not rejected explicitly"
 grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL" \
     && fail "install.sh: retired DNS_EGRESS_RESOLVER is still persisted"
 grep -Fq 'XRAY_RESOLVER' "$INSTALL" \
@@ -136,8 +177,11 @@ printf '%s\n' "$write_dns_env_fn" | grep -Eq '^[[:space:]]*DNS_API_TOKEN=' \
     && fail "write_dns_env emits the retired standalone API credential"
 grep -Fq 'DNS_API_TOKEN="$(openssl rand' "$INSTALL" \
     && fail "install.sh: generates the retired standalone API credential again"
-grep -Fq 'persist_mihomo_secret "$secret"' "$INSTALL" \
-    || fail "install.sh: controller secret is not mirrored after rendering mihomo"
+grep -Eq '^persist_mihomo_secret\(\)|DNS_MIHOMO_SECRET=' "$INSTALL" \
+    && fail "install.sh: controller secret is still mirrored into dns.env"
+printf '%s' "$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")" \
+    | grep -Fq 'mihomo_controller_inspection "$config"' \
+    || fail "install.sh: existing controller state is not read through the core inspector"
 
 grep -Eq '^DNS_LISTEN_DOH=' "$INSTALL" \
     && fail "install.sh: public DoH ingress returned"

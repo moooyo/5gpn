@@ -30,6 +30,8 @@ LE_LIVE_ROOT=/etc/letsencrypt/live
 IOSGEN=/opt/5gpn/scripts/gen-ios-profile.sh
 UI_DIR=/opt/5gpn/ui
 RENEW_LOCK_FILE=/run/5gpn/cert-renew.lock
+INSTALL_LOCK_FILE=/run/5gpn/install.lock
+RUNTIME_GATE_HELPER=/opt/5gpn/scripts/configure-runtime-gate.sh
 CONFIG_ROOT_MARKER=.5gpn-owned
 CONFIG_ROOT_MARKER_VALUE=5gpn-config
 CERT_ROOT_MARKER=.5gpn-cert-root-owned
@@ -37,14 +39,134 @@ CERT_ROOT_MARKER_VALUE=5gpn-cert-root-v1
 CERT_ROLE_MARKER=.5gpn-cert-role-owned
 CERT_ROLE_VALUE_PREFIX=5gpn-cert-role-v1
 UI_OWNERSHIP_MARKER=.5gpn-zashboard-owned
-UI_OWNERSHIP_VALUE=5gpn-zashboard
+UI_OWNERSHIP_VALUE=5gpn-ui-generations
 FIVEGPN_CERT_GROUP=fivegpn
+
+RENEW_HOOK_SOURCE="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+RENEW_HOOK_DIR="$(cd "$(dirname -- "$RENEW_HOOK_SOURCE")" && pwd)"
+UI_GENERATION_HELPER=""
+UI_GENERATION_HELPER_LOADED=0
+CERT_ROLE_HELPERS_LOADED=0
 
 BASE_DOMAIN=""
 CERT_MODE=""
 CONSOLE_DOMAIN=""
 DOT_DOMAIN=""
 _CERT_RENEWED=0
+
+bound_script_state() {
+    local path="$1" production="$2" metadata digest directory
+    [[ -f "$path" && ! -L "$path" && "$(stat -c %h -- "$path" 2>/dev/null)" == 1 ]] \
+        || return 1
+    if [[ "$path" == "$production" ]]; then
+        directory="$(dirname -- "$production")"
+        [[ -d "$directory" && ! -L "$directory" \
+           && "$(readlink -f -- "$directory")" == "$directory" \
+           && "$(stat -Lc '%u:%g:%a' -- "$directory")" == 0:0:755 ]] || return 1
+        [[ "$(stat -Lc '%u:%g:%a:%h' -- "$path" 2>/dev/null)" == 0:0:755:1 ]] || return 1
+    fi
+    metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$path" 2>/dev/null)" || return 1
+    digest="$(sha256sum -- "$path" | awk '{print $1}')" || return 1
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s:%s\n' "$metadata" "$digest"
+}
+
+load_cert_role_helpers() {
+    local helper path production before after hash_fd source_fd hash_metadata source_metadata fd_digest
+    local -a helpers=(publication-fs.sh cert-role-ctl.sh)
+    if [[ "$CERT_ROLE_HELPERS_LOADED" != 1 ]]; then
+        for helper in "${helpers[@]}"; do
+            production="/opt/5gpn/scripts/$helper"
+            if [[ "${RENEW_HOOK_LIB_ONLY:-0}" == 1 \
+               && -f "$RENEW_HOOK_DIR/$helper" && ! -L "$RENEW_HOOK_DIR/$helper" ]]; then
+                path="$RENEW_HOOK_DIR/$helper"
+            else
+                path="$production"
+            fi
+            before="$(bound_script_state "$path" "$production")" \
+                || { err "Certificate role helper is missing or unsafe: $path"; return 1; }
+            exec {hash_fd}<"$path" || return 1
+            exec {source_fd}<"$path" || { exec {hash_fd}<&-; return 1; }
+            hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$hash_fd")" \
+                || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+            source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$source_fd")" \
+                || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+            [[ "$hash_metadata" == "${before%:*}" && "$source_metadata" == "${before%:*}" ]] \
+                || { exec {hash_fd}<&-; exec {source_fd}<&-; err "Certificate role helper changed while it was anchored: $path"; return 1; }
+            fd_digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+                || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+            exec {hash_fd}<&-
+            [[ "$fd_digest" == "${before##*:}" ]] \
+                || { exec {source_fd}<&-; err "Certificate role helper bytes differ from the anchored path: $path"; return 1; }
+            # shellcheck source=/dev/null
+            source "/proc/self/fd/$source_fd" || { exec {source_fd}<&-; return 1; }
+            exec {source_fd}<&-
+            after="$(bound_script_state "$path" "$production")" || return 1
+            [[ "$after" == "$before" ]] \
+                || { err "Certificate role helper changed while it was loaded: $path"; return 1; }
+        done
+        declare -F publication_fs_commit_relative_pointer >/dev/null 2>&1 \
+            && [[ "${CERT_ROLE_CTL_API_VERSION:-0}" == 1 ]] || return 1
+        CERT_ROLE_HELPERS_LOADED=1
+    fi
+    CERT_ROLE_CTL_ROOT="$CERT_ROOT"
+    CERT_ROLE_CTL_CONFIG_MARKER="$CONFIG_ROOT_MARKER"
+    CERT_ROLE_CTL_CONFIG_MARKER_VALUE="$CONFIG_ROOT_MARKER_VALUE"
+    CERT_ROLE_CTL_ROOT_MARKER="$CERT_ROOT_MARKER"
+    CERT_ROLE_CTL_ROOT_MARKER_VALUE="$CERT_ROOT_MARKER_VALUE"
+    CERT_ROLE_CTL_ROLE_MARKER="$CERT_ROLE_MARKER"
+    CERT_ROLE_CTL_ROLE_VALUE_PREFIX="$CERT_ROLE_VALUE_PREFIX"
+    CERT_ROLE_CTL_SERVICE_GROUP="$FIVEGPN_CERT_GROUP"
+    CERT_ROLE_CTL_SERVICE_GID=""
+    CERT_ROLE_CTL_ALLOW_CREATE=0
+    CERT_ROLE_CTL_ADDITIONAL_GIDS=""
+    CERT_ROLE_CTL_LINEAGE_LIVE_ROOT="$LE_LIVE_ROOT"
+    CERT_ROLE_CTL_LINEAGE_ARCHIVE_ROOT="${LE_LIVE_ROOT%/live}/archive"
+    if [[ "${RENEW_HOOK_LIB_ONLY:-0}" == 1 && "$CERT_ROOT" != /etc/5gpn/cert ]]; then
+        CERT_ROLE_CTL_ALLOW_TEST_ROOT=1
+        CERT_ROLE_CTL_STAGE_PARENT="$(dirname -- "$CERT_ROOT")/.cert-role-staging"
+    else
+        CERT_ROLE_CTL_ALLOW_TEST_ROOT=0
+        CERT_ROLE_CTL_STAGE_PARENT=/run/5gpn
+    fi
+}
+
+load_ui_generation_helper() {
+    local before after hash_fd source_fd hash_metadata source_metadata fd_digest
+    [[ "$UI_GENERATION_HELPER_LOADED" == 1 ]] && return 0
+    if [[ "${RENEW_HOOK_LIB_ONLY:-0}" == 1 \
+       && -f "$RENEW_HOOK_DIR/ui-generation.sh" && ! -L "$RENEW_HOOK_DIR/ui-generation.sh" ]]; then
+        UI_GENERATION_HELPER="$RENEW_HOOK_DIR/ui-generation.sh"
+    else
+        UI_GENERATION_HELPER=/opt/5gpn/scripts/ui-generation.sh
+    fi
+    before="$(bound_script_state "$UI_GENERATION_HELPER" /opt/5gpn/scripts/ui-generation.sh)" \
+        || { err "UI generation helper is missing or unsafe: $UI_GENERATION_HELPER"; return 1; }
+    exec {hash_fd}<"$UI_GENERATION_HELPER" || return 1
+    exec {source_fd}<"$UI_GENERATION_HELPER" || { exec {hash_fd}<&-; return 1; }
+    hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$hash_fd")" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$source_fd")" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    [[ "$hash_metadata" == "${before%:*}" && "$source_metadata" == "${before%:*}" ]] \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; err "UI generation helper changed while it was anchored."; return 1; }
+    fd_digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+        || { exec {hash_fd}<&-; exec {source_fd}<&-; return 1; }
+    exec {hash_fd}<&-
+    [[ "$fd_digest" == "${before##*:}" ]] \
+        || { exec {source_fd}<&-; err "UI generation helper bytes differ from the anchored path."; return 1; }
+    # shellcheck source=scripts/ui-generation.sh
+    source "/proc/self/fd/$source_fd" || { exec {source_fd}<&-; return 1; }
+    exec {source_fd}<&-
+    after="$(bound_script_state "$UI_GENERATION_HELPER" /opt/5gpn/scripts/ui-generation.sh)" \
+        || { err "Could not revalidate the UI generation helper."; return 1; }
+    [[ "$after" == "$before" \
+       && ( "$UI_DIR" != /opt/5gpn/ui || "$UI_GENERATION_ROOT" == "$UI_DIR" ) \
+       && "$UI_GENERATION_MARKER" == "$UI_OWNERSHIP_MARKER" \
+       && "$UI_GENERATION_MARKER_VALUE" == "$UI_OWNERSHIP_VALUE" ]] \
+        || { err "UI generation helper changed or drifted from the deploy-hook contract."; return 1; }
+    UI_GENERATION_HELPER_LOADED=1
+}
 
 cfg_get() { grep -E "^${1}=" "$DNS_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
 
@@ -81,7 +203,9 @@ acquire_deploy_lock() {
     [[ "${FIVEGPN_CERT_LOCK_HELD:-0}" == 1 ]] && return 0
     command -v flock >/dev/null 2>&1 \
         || { err "flock is required for certificate deployment exclusion."; return 1; }
-    lock_dir="$(dirname -- "$RENEW_LOCK_FILE")"
+    lock_dir="$(dirname -- "$INSTALL_LOCK_FILE")"
+    [[ "$lock_dir" == "$(dirname -- "$RENEW_LOCK_FILE")" ]] \
+        || { err "Certificate deployment locks must share one private directory."; return 1; }
     root_group="$(group_gid root)" || return 1
     if [[ ! -e "$lock_dir" && ! -L "$lock_dir" ]]; then
         install -d -o root -g root -m 0700 "$lock_dir" || return 1
@@ -92,6 +216,20 @@ acquire_deploy_lock() {
        && "$(path_gid "$lock_dir")" == "$root_group" \
        && "$(path_mode "$lock_dir")" == 700 ]] \
         || { err "Unsafe certificate deployment lock directory: $lock_dir"; return 1; }
+    if [[ -e "$INSTALL_LOCK_FILE" || -L "$INSTALL_LOCK_FILE" ]]; then
+        safe_plain_file "$INSTALL_LOCK_FILE" "$root_group" 600 \
+            || { err "Unsafe installer lock file: $INSTALL_LOCK_FILE"; return 1; }
+    fi
+    exec 8>"$INSTALL_LOCK_FILE"
+    chmod 0600 "$INSTALL_LOCK_FILE" || { exec 8>&-; return 1; }
+    safe_plain_file "$INSTALL_LOCK_FILE" "$root_group" 600 || { exec 8>&-; return 1; }
+    fd_identity="$(stat -Lc '%d:%i' -- "/proc/$$/fd/8" 2>/dev/null || true)"
+    file_identity="$(stat -Lc '%d:%i' -- "$INSTALL_LOCK_FILE" 2>/dev/null || true)"
+    [[ -n "$fd_identity" && "$fd_identity" == "$file_identity" ]] \
+        || { exec 8>&-; err "The installer lock descriptor is unsafe."; return 1; }
+    flock -w 10 8 \
+        || { err "A 5gpn install/configure transaction is active; deferring certificate deployment."; return 1; }
+    assert_no_retained_configure_gate || return 1
     if [[ -e "$RENEW_LOCK_FILE" || -L "$RENEW_LOCK_FILE" ]]; then
         safe_plain_file "$RENEW_LOCK_FILE" "$root_group" 600 \
             || { err "Unsafe certificate deployment lock file: $RENEW_LOCK_FILE"; return 1; }
@@ -106,6 +244,58 @@ acquire_deploy_lock() {
     flock -w 10 9 \
         || { err "Another 5gpn certificate operation is running."; return 1; }
 }
+
+assert_no_retained_configure_gate() (
+    local production=/opt/5gpn/scripts/configure-runtime-gate.sh
+    local directory expected_uid=0 expected_gid=0 before_metadata before_digest
+    local source_fd hash_fd marker_fd fd metadata digest after_metadata after_digest
+    directory="$(dirname -- "$RUNTIME_GATE_HELPER")" || return 1
+    if [[ "$RUNTIME_GATE_HELPER" != "$production" ]]; then
+        expected_uid="${EUID:-$(id -u)}"
+        expected_gid="$(id -g)" || return 1
+    fi
+    [[ -d "$directory" && ! -L "$directory" \
+       && "$(readlink -f -- "$directory" 2>/dev/null)" == "$directory" \
+       && "$(stat -Lc '%u:%g:%a' -- "$directory" 2>/dev/null)" \
+          == "${expected_uid}:${expected_gid}:755" \
+       && -f "$RUNTIME_GATE_HELPER" && ! -L "$RUNTIME_GATE_HELPER" ]] \
+        || { err "The configure runtime-gate helper parent or path is unsafe."; return 1; }
+    before_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$RUNTIME_GATE_HELPER" 2>/dev/null)" \
+        || return 1
+    [[ "$before_metadata" == *":${expected_uid}:${expected_gid}:755:1" ]] \
+        || { err "The configure runtime-gate helper metadata is unsafe."; return 1; }
+    before_digest="$(sha256sum -- "$RUNTIME_GATE_HELPER" | awk '{print $1}')" \
+        || return 1
+    [[ "$before_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+    exec {source_fd}<"$RUNTIME_GATE_HELPER" || return 1
+    exec {hash_fd}<"$RUNTIME_GATE_HELPER" || return 1
+    exec {marker_fd}<"$RUNTIME_GATE_HELPER" || return 1
+    for fd in "$source_fd" "$hash_fd" "$marker_fd"; do
+        metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "/proc/self/fd/$fd" 2>/dev/null)" \
+            || return 1
+        [[ "$metadata" == "$before_metadata" ]] \
+            || { err "The configure runtime-gate helper changed while it was opened."; return 1; }
+    done
+    digest="$(sha256sum -- "/proc/self/fd/$hash_fd" | awk '{print $1}')" \
+        || return 1
+    [[ "$digest" == "$before_digest" ]] \
+        || { err "The configure runtime-gate helper FD digest changed."; return 1; }
+    awk '
+        $0 == "# 5gpn-configure-runtime-gate-id: v1" { marker = 1 }
+        index($0, "wait|validate-ui|assert-clear") { modes = 1 }
+        END { exit !(marker && modes) }
+    ' "/proc/self/fd/$marker_fd" \
+        || { err "The configure runtime-gate helper generation is invalid."; return 1; }
+    after_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' -- "$RUNTIME_GATE_HELPER" 2>/dev/null)" \
+        || return 1
+    after_digest="$(sha256sum -- "$RUNTIME_GATE_HELPER" | awk '{print $1}')" \
+        || return 1
+    [[ "$after_metadata" == "$before_metadata" && "$after_digest" == "$before_digest" ]] \
+        || { err "The configure runtime-gate helper path changed before execution."; return 1; }
+    bash "/proc/self/fd/$source_fd" assert-clear \
+        || { err "A retained configure runtime gate blocks independent certificate deployment until installed '5gpn configure' recovers it."; return 1; }
+)
 
 cert_chain_trusted() {
     local cert="$1"
@@ -168,33 +358,6 @@ validate_cert_pair() {
         || { err "certificate chain is not trusted for production TLS"; return 1; }
 }
 
-cleanup_staged() {
-    local f
-    for f in "$@"; do
-        if [[ -n "$f" ]]; then
-            rm -f -- "$f" 2>/dev/null || true
-        fi
-    done
-    return 0
-}
-
-role_group() {
-    local role="$1" group
-    case "$role" in
-        dot|console) group="$FIVEGPN_CERT_GROUP" ;;
-        web)         group=root ;;
-        *)           return 1 ;;
-    esac
-    if getent group "$group" >/dev/null 2>&1; then
-        printf '%s\n' "$group"
-    elif [[ "$CERT_ROOT" != /etc/5gpn/cert ]]; then
-        id -gn
-    else
-        err "required certificate group is missing: $group"
-        return 1
-    fi
-}
-
 path_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || true; }
 path_gid() { stat -c %g -- "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null || true; }
 path_mode() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true; }
@@ -212,15 +375,8 @@ group_gid() {
     printf '%s\n' "$gid"
 }
 
-root_gid() {
-    group_gid root
-}
-
-canonical_directory() {
-    local path="$1" canonical
-    [[ -d "$path" && ! -L "$path" ]] || return 1
-    canonical="$(readlink -f -- "$path" 2>/dev/null || true)"
-    [[ -n "$canonical" && "$canonical" == "$path" ]]
+cert_role_ctl_group_gid_override() {
+    group_gid "$1"
 }
 
 safe_plain_file() {
@@ -232,362 +388,24 @@ safe_plain_file() {
        && "$(path_nlink "$path")" == 1 ]]
 }
 
-safe_marker() {
-    local dir="$1" name="$2" value="$3" gid marker="${1}/${2}"
-    gid="$(root_gid)" || return 1
-    safe_plain_file "$marker" "$gid" 644 \
-        && [[ "$(cat "$marker" 2>/dev/null || true)" == "$value" ]]
-}
-
 cert_root_is_safe() {
-    local config_root root_group entry name
-    config_root="$(dirname -- "$CERT_ROOT")"
-    [[ "$(basename -- "$CERT_ROOT")" == cert ]] || return 1
-    root_group="$(root_gid)" || return 1
-    canonical_directory "$config_root" \
-        && [[ "$(path_uid "$config_root")" == "$EUID" \
-           && "$(path_gid "$config_root")" == "$root_group" \
-           && "$(path_mode "$config_root")" == 755 ]] \
-        && safe_marker "$config_root" "$CONFIG_ROOT_MARKER" "$CONFIG_ROOT_MARKER_VALUE" \
-        || return 1
-    canonical_directory "$CERT_ROOT" \
-        && [[ "$(path_uid "$CERT_ROOT")" == "$EUID" \
-           && "$(path_gid "$CERT_ROOT")" == "$root_group" \
-           && "$(path_mode "$CERT_ROOT")" == 751 ]] \
-        && safe_marker "$CERT_ROOT" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" \
-        || return 1
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROOT_MARKER") ;;
-            .provenance) safe_plain_file "$entry" "$root_group" 640 || return 1 ;;
-            .certbot-ownership) safe_plain_file "$entry" "$root_group" 640 || return 1 ;;
-            dot|console) [[ -d "$entry" && ! -L "$entry" ]] || return 1 ;;
-            web)
-                # A web role may remain from the retired console origin. It is
-                # never refreshed, but accepting it must still prove the full
-                # owned role structure rather than treating any directory as
-                # harmless legacy state.
-                role_tree_is_safe web "$entry" || return 1 ;;
-            *) return 1 ;;
-        esac
-    done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    load_cert_role_helpers || return 1
+    cert_role_ctl_root_boundary_is_safe
 }
 
 ui_dir_is_safe() {
-    local root_group
-    root_group="$(root_gid)" || return 1
-    canonical_directory "$UI_DIR" \
-        && [[ "$(path_uid "$UI_DIR")" == "$EUID" \
-           && "$(path_gid "$UI_DIR")" == "$root_group" \
-           && "$(path_mode "$UI_DIR")" == 755 ]] \
-        && safe_marker "$UI_DIR" "$UI_OWNERSHIP_MARKER" "$UI_OWNERSHIP_VALUE"
+    ui_generation_current_path "$UI_DIR" >/dev/null
 }
 
-generation_name_is_safe() {
-    [[ "${1:-}" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]]
-}
-
-generation_candidate_is_safe() {
-    local path="$1" expected_gid="$2" entry name count=0
-    canonical_directory "$path" || return 1
-    [[ "$(path_uid "$path")" == "$EUID" \
-       && "$(path_gid "$path")" == "$expected_gid" \
-       && "$(path_mode "$path")" == 750 ]] || return 1
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            fullchain.pem|privkey.pem)
-                safe_plain_file "$entry" "$expected_gid" 640 || return 1 ;;
-            *) return 1 ;;
-        esac
-        ((count += 1))
-    done < <(find "$path" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    (( count <= 2 ))
-}
-
-interrupted_empty_generation_is_safe() {
-    local path="$1" expected_gid="$2" actual_gid root_group entry
-    canonical_directory "$path" || return 1
-    actual_gid="$(path_gid "$path")"
-    root_group="$(root_gid)" || return 1
-    [[ "$(path_uid "$path")" == "$EUID" \
-       && "$(path_mode "$path")" == 700 \
-       && ( "$actual_gid" == "$root_group" || "$actual_gid" == "$expected_gid" ) ]] \
-        || return 1
-    entry="$(find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return 1
-    [[ -z "$entry" ]]
-}
-
-generation_is_safe() {
-    local path="$1" expected_gid="$2" count
-    generation_candidate_is_safe "$path" "$expected_gid" || return 1
-    count="$(find "$path" -mindepth 1 -maxdepth 1 -type f -print 2>/dev/null | wc -l | tr -d '[:space:]')" \
-        || return 1
-    [[ "$count" == 2 ]]
-}
-
-role_boundary_is_safe() {
-    local role="$1" dest="$2" group expected_gid root_group marker generations
-    [[ "$dest" == "$CERT_ROOT/$role" ]] || return 1
-    group="$(role_group "$role")" || return 1
-    expected_gid="$(group_gid "$group")" || return 1
-    root_group="$(root_gid)" || return 1
-    canonical_directory "$dest" \
-        && [[ "$(path_uid "$dest")" == "$EUID" \
-           && "$(path_gid "$dest")" == "$expected_gid" \
-           && "$(path_mode "$dest")" == 750 ]] \
-        || return 1
-    marker="${dest}/${CERT_ROLE_MARKER}"
-    safe_plain_file "$marker" "$root_group" 644 \
-        && [[ "$(cat "$marker" 2>/dev/null || true)" == "${CERT_ROLE_VALUE_PREFIX}:${role}" ]] \
-        || return 1
-    generations="${dest}/generations"
-    canonical_directory "$generations" \
-        && [[ "$(path_uid "$generations")" == "$EUID" \
-           && "$(path_gid "$generations")" == "$expected_gid" \
-           && "$(path_mode "$generations")" == 750 ]] \
-        || return 1
-}
-
-role_tree_is_safe() {
-    local role="$1" dest="$2" group expected_gid root_group entry name current target
-    role_boundary_is_safe "$role" "$dest" || return 1
-    group="$(role_group "$role")" || return 1
-    expected_gid="$(group_gid "$group")" || return 1
-    root_group="$(root_gid)" || return 1
-    current="${dest}/current"
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROLE_MARKER"|generations) ;;
-            current)
-                [[ -L "$entry" \
-                   && "$(path_uid "$entry")" == "$EUID" \
-                   && "$(path_gid "$entry")" == "$root_group" \
-                   && "$(path_nlink "$entry")" == 1 ]] || return 1 ;;
-            *) return 1 ;;
-        esac
-    done < <(find "$dest" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        generation_name_is_safe "$name" || return 1
-        generation_is_safe "$entry" "$expected_gid" || return 1
-    done < <(find "${dest}/generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    if [[ -e "$current" || -L "$current" ]]; then
-        [[ -L "$current" ]] || return 1
-        target="$(readlink -- "$current")" || return 1
-        [[ "$target" == generations/* ]] || return 1
-        generation_name_is_safe "${target#generations/}" || return 1
-        generation_is_safe "${dest}/${target}" "$expected_gid"
-    fi
-}
-
-remove_role_generation() {
-    local role="$1" dest="$2" generation="$3" cert_root_real dest_real gen_real group expected_gid entry name
-    [[ -n "$generation" && "$generation" != */* ]] || return 1
-    generation_name_is_safe "$generation" \
-        || [[ "$generation" =~ ^\.new\.[A-Za-z0-9]+$ ]] \
-        || return 1
-    role_boundary_is_safe "$role" "$dest" || return 1
-    cert_root_real="$(readlink -f -- "$CERT_ROOT")" || return 1
-    dest_real="$(readlink -f -- "$dest")" || return 1
-    [[ "$dest_real" == "$cert_root_real/$role" ]] || return 1
-    gen_real="$(readlink -f -- "${dest}/generations/${generation}")" || return 1
-    [[ "$gen_real" == "$dest_real/generations/$generation" && -d "$gen_real" && ! -L "$gen_real" ]] || return 1
-    group="$(role_group "$role")" || return 1
-    expected_gid="$(group_gid "$group")" || return 1
-    if [[ "$generation" =~ ^\.new\.[A-Za-z0-9]+$ ]]; then
-        generation_candidate_is_safe "$gen_real" "$expected_gid" \
-            || interrupted_empty_generation_is_safe "$gen_real" "$expected_gid" \
-            || return 1
-    else
-        generation_candidate_is_safe "$gen_real" "$expected_gid" || return 1
-    fi
-    rm -rf -- "$gen_real"
-}
-
-cleanup_role_generations() {
-    local role="$1" dest="$2" keep="$3" entry name
-    role_tree_is_safe "$role" "$dest" || return 1
-    generation_name_is_safe "$keep" || return 1
-    while IFS= read -r entry; do
-        [[ -n "$entry" ]] || continue
-        name="$(basename -- "$entry")"
-        [[ "$name" == "$keep" ]] && continue
-        remove_role_generation "$role" "$dest" "$name" || return 1
-    done < <(find "${dest}/generations" -mindepth 1 -maxdepth 1 -type d -print)
-}
-
-cleanup_role_candidates() {
-    local roles_name="$1" dests_name="$2" generations_name="$3" links_name="$4"
-    local -n roles_ref="$roles_name" dests_ref="$dests_name"
-    local -n generations_ref="$generations_name" links_ref="$links_name"
-    local i role dest generation link current target
-    for i in "${!generations_ref[@]}"; do
-        role="${roles_ref[$i]}"
-        dest="${dests_ref[$i]}"
-        generation="${generations_ref[$i]}"
-        link="${links_ref[$i]:-}"
-        [[ -z "$link" ]] || rm -f -- "$link" 2>/dev/null || true
-        [[ -n "$generation" && -d "$generation" && ! -L "$generation" ]] || continue
-        target="generations/$(basename -- "$generation")"
-        current="$(readlink -- "${dest}/current" 2>/dev/null || true)"
-        [[ "$current" == "$target" ]] \
-            || remove_role_generation "$role" "$dest" "$(basename -- "$generation")" 2>/dev/null \
-            || true
-    done
-}
-
-scrub_interrupted_role_candidates() {
-    local role="$1" dest="$2" current target entry name root_group group expected_gid
-    cert_root_is_safe || return 1
-    role_boundary_is_safe "$role" "$dest" || return 1
-    root_group="$(root_gid)" || return 1
-    group="$(role_group "$role")" || return 1
-    expected_gid="$(group_gid "$group")" || return 1
-    current="$(readlink -- "$dest/current" 2>/dev/null || true)"
-    if [[ -n "$current" ]]; then
-        [[ "$current" == generations/* ]] || return 1
-        generation_name_is_safe "${current#generations/}" || return 1
-        generation_is_safe "$dest/$current" "$expected_gid" || return 1
-    elif [[ -e "$dest/current" || -L "$dest/current" ]]; then
-        return 1
-    fi
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROLE_MARKER"|generations|current) ;;
-            .current.*|.rollback.*)
-                [[ "$name" =~ ^\.(current|rollback)\.[0-9]+\.[0-9]+$ \
-                   && -L "$entry" \
-                   && "$(path_uid "$entry")" == "$EUID" \
-                   && "$(path_gid "$entry")" == "$root_group" \
-                   && "$(path_nlink "$entry")" == 1 ]] || return 1
-                target="$(readlink -- "$entry")" || return 1
-                [[ "$target" == generations/* ]] || return 1
-                generation_name_is_safe "${target#generations/}" || return 1
-                rm -f -- "$entry" || return 1 ;;
-            *) return 1 ;;
-        esac
-    done < <(find "$dest" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-    while IFS= read -r -d '' entry; do
-        name="$(basename -- "$entry")"
-        [[ "generations/$name" == "$current" ]] && continue
-        if [[ "$name" =~ ^\.new\.[A-Za-z0-9]+$ ]]; then
-            generation_candidate_is_safe "$entry" "$expected_gid" \
-                || interrupted_empty_generation_is_safe "$entry" "$expected_gid" \
-                || return 1
-        else
-            generation_name_is_safe "$name" || return 1
-            generation_is_safe "$entry" "$expected_gid" || return 1
-        fi
-        remove_role_generation "$role" "$dest" "$name" || return 1
-    done < <(find "$dest/generations" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
-}
-
-# publish_roles <cert> <key> <mode> <base> <console> <dot>
-# Stage complete generations for all roles, then atomically swap each role's
-# single current symlink. A TLS reader can never observe a mixed keypair.
-publish_roles() {
-    local cert="$1" key="$2" mode="$3" base="$4"
-    local console="$5" dot="$6" r dest group expected_gid root_group generation final link_tmp old i j rollback_link
-    local -a roles=(dot console) dests=() generations=() links=() old_targets=()
-
-    cert_root_is_safe \
-        || { err "certificate publication root is unsafe: $CERT_ROOT"; return 1; }
-    root_group="$(root_gid)" || return 1
-    for r in "${roles[@]}"; do
-        dest="${CERT_ROOT}/${r}"
-        role_tree_is_safe "$r" "$dest" \
-            || { err "certificate role tree is unsafe: $dest"; return 1; }
-    done
-    for r in "${roles[@]}"; do
-        dest="${CERT_ROOT}/${r}"
-        group="$(role_group "$r")" || return 1
-        expected_gid="$(group_gid "$group")" || return 1
-        if [[ -e "${dest}/current" || -L "${dest}/current" ]]; then
-            [[ -L "${dest}/current" ]] || { err "unsafe current path in $dest"; return 1; }
-            old="$(readlink -- "${dest}/current")"
-            [[ "$old" == generations/* ]] \
-                && generation_name_is_safe "${old#generations/}" \
-                && generation_is_safe "${dest}/${old}" "$expected_gid" \
-                || { err "unsafe current symlink in $dest"; return 1; }
-        else
-            old=""
-        fi
-        generation="$(mktemp -d "${dest}/generations/.new.XXXXXX")" || return 1
-        dests+=("$dest")
-        generations+=("$generation")
-        links+=("")
-        old_targets+=("$old")
-        i=$((${#generations[@]} - 1))
-        chgrp "$group" "$generation" && chmod 0750 "$generation" \
-            || { cleanup_role_candidates roles dests generations links; return 1; }
-        if ! install -g "$group" -m 0640 "$cert" "${generation}/fullchain.pem" \
-           || ! install -g "$group" -m 0640 "$key" "${generation}/privkey.pem"; then
-            err "cannot stage certificate pair in $dest"
-            cleanup_role_candidates roles dests generations links
-            return 1
-        fi
-        generation_is_safe "$generation" "$expected_gid" \
-            || { cleanup_role_candidates roles dests generations links; return 1; }
-        if ! validate_cert_pair "${generation}/fullchain.pem" "${generation}/privkey.pem" "$mode" "$base" \
-            "$console" "$dot"; then
-            cleanup_role_candidates roles dests generations links
-            return 1
-        fi
-        final="${dest}/generations/generation-$(date -u +%Y%m%dT%H%M%SZ)-${BASHPID}-${RANDOM}"
-        [[ ! -e "$final" && ! -L "$final" ]] \
-            || { cleanup_role_candidates roles dests generations links; return 1; }
-        mv -- "$generation" "$final" \
-            || { cleanup_role_candidates roles dests generations links; return 1; }
-        generations[$i]="$final"
-        generation_is_safe "$final" "$expected_gid" \
-            || { cleanup_role_candidates roles dests generations links; return 1; }
-        link_tmp="${dest}/.current.${BASHPID}.${RANDOM}"
-        [[ ! -e "$link_tmp" && ! -L "$link_tmp" ]] \
-            || { cleanup_role_candidates roles dests generations links; return 1; }
-        links[$i]="$link_tmp"
-        ln -s "generations/$(basename -- "$final")" "$link_tmp" \
-            || { cleanup_role_candidates roles dests generations links; return 1; }
-        [[ "$(path_uid "$link_tmp")" == "$EUID" \
-           && "$(path_gid "$link_tmp")" == "$root_group" \
-           && "$(path_nlink "$link_tmp")" == 1 ]] \
-            || { cleanup_role_candidates roles dests generations links; return 1; }
-    done
-
-    cert_root_is_safe \
-        || { cleanup_role_candidates roles dests generations links; return 1; }
-
-    for i in "${!roles[@]}"; do
-        if ! mv -Tf -- "${links[$i]}" "${dests[$i]}/current"; then
-            for ((j = 0; j < i; j++)); do
-                if [[ -n "${old_targets[$j]}" ]]; then
-                    rollback_link="${dests[$j]}/.rollback.${BASHPID}.${RANDOM}"
-                    ln -s "${old_targets[$j]}" "$rollback_link" \
-                        && mv -Tf -- "$rollback_link" "${dests[$j]}/current" || true
-                else
-                    rm -f -- "${dests[$j]}/current"
-                fi
-            done
-            cleanup_role_candidates roles dests generations links
-            err "cannot atomically publish certificate role ${roles[$i]}"
-            return 1
-        fi
-        links[$i]=""
-    done
-    for i in "${!roles[@]}"; do
-        cleanup_role_generations "${roles[$i]}" "${dests[$i]}" \
-            "$(basename -- "${generations[$i]}")" || return 1
-        rm -f -- "${dests[$i]}/fullchain.pem" "${dests[$i]}/privkey.pem"
-    done
+renew_role_validate_candidate() {
+    validate_cert_pair "$1" "$2" "$RENEW_ROLE_MODE" "$RENEW_ROLE_BASE" \
+        "$RENEW_ROLE_CONSOLE" "$RENEW_ROLE_DOT"
 }
 
 # deploy_lineage <live-dir>: validate and deploy only the exact current 5gpn
 # lineage. No basename-suffix matching and no scan of unrelated live dirs.
 deploy_lineage() {
-    local live="${1%/}" expected="${LE_LIVE_ROOT}/${BASE_DOMAIN}"
+    local live="${1%/}" expected="${LE_LIVE_ROOT}/${BASE_DOMAIN}" rc=0
     [[ "$live" == "$expected" ]] \
         || { err "refusing non-5gpn lineage: $live"; return 1; }
     [[ -d "$live" ]] || { err "5gpn lineage directory is missing: $live"; return 1; }
@@ -595,15 +413,100 @@ deploy_lineage() {
     validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
         "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$DOT_DOMAIN" \
         || return 1
-    publish_roles "${live}/fullchain.pem" "${live}/privkey.pem" \
-        "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$DOT_DOMAIN" \
-        || return 1
+    load_cert_role_helpers || return 1
+    RENEW_ROLE_MODE="$CERT_MODE"
+    RENEW_ROLE_BASE="$BASE_DOMAIN"
+    RENEW_ROLE_CONSOLE="$CONSOLE_DOMAIN"
+    RENEW_ROLE_DOT="$DOT_DOMAIN"
+    cert_role_ctl_deploy_lineage "$live" "$BASE_DOMAIN" renew_role_validate_candidate || rc=$?
+    if [[ "$rc" != 0 ]]; then
+        case "$CERT_ROLE_CTL_COMMIT_STATE" in
+            committed-undurable)
+                err "renewed role current changed, but durability is unconfirmed; no rollback was attempted" ;;
+            committed-partial|committed)
+                err "renewed role publication is committed or partial; rerun for forward repair" ;;
+        esac
+        [[ -z "$CERT_ROLE_CTL_LAST_ERROR" ]] || err "$CERT_ROLE_CTL_LAST_ERROR"
+        return "$rc"
+    fi
     _CERT_RENEWED=1
     ok "${CERT_MODE} cert for ${BASE_DOMAIN} redeployed to dot/console"
 }
 
+deployed_roles_match_lineage() {
+    local live="$1" role
+    load_cert_role_helpers || return 1
+    for role in dot console; do
+        cert_role_ctl_validate_current_role "$role" || return 1
+        cmp -s "$live/fullchain.pem" "$CERT_ROOT/$role/current/fullchain.pem" || return 1
+        cmp -s "$live/privkey.pem" "$CERT_ROOT/$role/current/privkey.pem" || return 1
+    done
+}
+
+refresh_ios_profile_generation() {
+    local gw candidate="" generator_before generator_after generator_hash_fd generator_source_fd
+    local generator_hash_metadata generator_source_metadata generator_fd_digest
+    load_ui_generation_helper || return 1
+    gw="$(cfg_get DNS_GATEWAY_IP)"
+    [[ -n "$DOT_DOMAIN" && -n "$gw" ]] || return 1
+    if [[ "$UI_DIR" == /opt/5gpn/ui && "$IOSGEN" != /opt/5gpn/scripts/gen-ios-profile.sh ]]; then
+        return 1
+    fi
+    generator_before="$(bound_script_state "$IOSGEN" /opt/5gpn/scripts/gen-ios-profile.sh)" \
+        || return 1
+    ui_generation_prepare_existing_current "$UI_DIR" || return 1
+    ui_dir_is_safe || return 1
+    candidate="$(ui_generation_clone_current "$UI_DIR")" || return 1
+    exec {generator_hash_fd}<"$IOSGEN" \
+        || { ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+    exec {generator_source_fd}<"$IOSGEN" \
+        || { exec {generator_hash_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+    generator_hash_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' \
+        -- "/proc/self/fd/$generator_hash_fd")" \
+        || { exec {generator_hash_fd}<&-; exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+    generator_source_metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' \
+        -- "/proc/self/fd/$generator_source_fd")" \
+        || { exec {generator_hash_fd}<&-; exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+    [[ "$generator_hash_metadata" == "${generator_before%:*}" \
+       && "$generator_source_metadata" == "${generator_before%:*}" ]] \
+        || { exec {generator_hash_fd}<&-; exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+    generator_fd_digest="$(sha256sum -- "/proc/self/fd/$generator_hash_fd" | awk '{print $1}')" \
+        || { exec {generator_hash_fd}<&-; exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+    exec {generator_hash_fd}<&-
+    [[ "$generator_fd_digest" == "${generator_before##*:}" ]] \
+        || { exec {generator_source_fd}<&-; ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+    if ! bash "/proc/self/fd/$generator_source_fd" "$DOT_DOMAIN" "$gw" "$candidate"; then
+        exec {generator_source_fd}<&-
+        ui_generation_cleanup_candidate "$UI_DIR" "$candidate" \
+            || warn "Unpublished profile generation cleanup failed; retained at $candidate."
+        return 1
+    fi
+    exec {generator_source_fd}<&-
+    generator_after="$(bound_script_state "$IOSGEN" /opt/5gpn/scripts/gen-ios-profile.sh)" \
+        || { ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true; return 1; }
+    if [[ "$generator_after" != "$generator_before" ]]; then
+        ui_generation_cleanup_candidate "$UI_DIR" "$candidate" \
+            || warn "Changed-generator candidate cleanup failed; retained at $candidate."
+        return 1
+    fi
+    if ! ui_generation_publish "$UI_DIR" "$candidate"; then
+        case "$UI_GENERATION_COMMIT_STATE" in
+            committed-undurable)
+                warn "UI current already switched to the new profile generation, but directory durability is unconfirmed; no rollback was attempted." ;;
+            committed)
+                warn "UI current committed, but post-commit validation failed; no rollback was attempted." ;;
+            *)
+                ui_generation_cleanup_candidate "$UI_DIR" "$candidate" \
+                    || warn "Unpublished profile generation cleanup failed; retained at $candidate." ;;
+        esac
+        return 1
+    fi
+    [[ "$UI_GENERATION_GC_WARNING" == 0 ]] \
+        || warn "The renewed profiles are active, but an older unreferenced UI generation could not be removed."
+}
+
 renew_hook_main() {
-    local configured raw_mode live expected gw
+    local configured raw_mode live expected
     configured="$(cfg_get DNS_BASE_DOMAIN)"
     if ! BASE_DOMAIN="$(normalized_base_domain "$configured")"; then
         err "DNS_BASE_DOMAIN is missing or invalid; no certificate was deployed."
@@ -644,19 +547,32 @@ renew_hook_main() {
 
     acquire_deploy_lock || return 1
 
+    load_cert_role_helpers || return 1
+    cert_role_ctl_scrub_role_root_candidates || return 1
     cert_root_is_safe || return 1
     local role
     for role in dot console; do
-        scrub_interrupted_role_candidates "$role" "$CERT_ROOT/$role" || return 1
+        cert_role_ctl_scrub_role "$role" || return 1
     done
 
     if [[ "${RENEW_HOOK_VALIDATE_ONLY:-0}" == 1 ]]; then
         for role in dot console; do
-            role_tree_is_safe "$role" "$CERT_ROOT/$role" || return 1
+            cert_role_ctl_validate_role "$role" 1 || return 1
         done
         validate_cert_pair "${live}/fullchain.pem" "${live}/privkey.pem" \
             "$CERT_MODE" "$BASE_DOMAIN" "$CONSOLE_DOMAIN" "$DOT_DOMAIN"
         return
+    fi
+
+    if [[ "${FIVEGPN_PROFILE_ONLY_REFRESH:-0}" == 1 ]]; then
+        deployed_roles_match_lineage "$live" \
+            || { err "Profile-only refresh requires role copies that already match the live lineage."; return 1; }
+        if refresh_ios_profile_generation; then
+            ok "iOS profiles repaired in a cloned generation without republishing certificate roles."
+            return 0
+        fi
+        err "Profile-only generation repair failed; the prior current generation remains selected unless a committed-switch warning was reported."
+        return 1
     fi
 
     _CERT_RENEWED=0
@@ -667,18 +583,17 @@ renew_hook_main() {
     # is not used as a certificate-reload API.
     ok "Certificate files published; TLS readers will load them on the next handshake."
 
-    # Re-sign both iOS profiles with the renewed DoT role. The generator stages
-    # and signs both payloads before atomically replacing either live file.
+    # Re-sign both iOS profiles in a clone of the complete current generation.
+    # The helper validates that clone and performs the only live current switch.
     # Best-effort: certificate deployment is already complete, so profile
-    # failure must not fail renewal and the last-known-good profiles stay live.
-    gw="$(cfg_get DNS_GATEWAY_IP)"
-    if [[ "$_CERT_RENEWED" == 1 && -x "$IOSGEN" && -n "$DOT_DOMAIN" && -n "$gw" ]]; then
-        if ! ui_dir_is_safe; then
-            warn "iOS profile re-sign skipped: the zashboard UI tree is missing, unsafe, or unowned: $UI_DIR"
-        elif bash "$IOSGEN" "$DOT_DOMAIN" "$gw" "$UI_DIR"; then
-            ok "iOS profiles re-signed with the renewed cert."
+    # failure must not fail renewal and the last-known-good generation stays live.
+    if [[ "${FIVEGPN_SKIP_PROFILE_REFRESH:-0}" == 1 ]]; then
+        info "Profile refresh deferred to the enclosing installer generation transaction."
+    elif [[ "$_CERT_RENEWED" == 1 ]]; then
+        if refresh_ios_profile_generation; then
+            ok "iOS profiles re-signed and atomically activated with the renewed cert."
         else
-            warn "iOS profile re-sign failed (non-fatal); inspect the preceding generator error and any retained recovery path before rerunning 'install.sh ios'."
+            warn "iOS profile re-sign failed (non-fatal); the prior current generation remains selected unless a committed-switch warning was reported."
         fi
     fi
 }

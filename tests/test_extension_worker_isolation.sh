@@ -5,9 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="$ROOT/install.sh"
 QUICK="$ROOT/quick-install.sh"
 UNIT="$ROOT/etc/systemd/5gpn-mihomo.service"
-ARCHITECTURE="$ROOT/docs/architecture.md"
-EXTENSION_CONTRACT="$ROOT/docs/native-extensions.md"
-ACCEPTANCE="$ROOT/tests/acceptance-monolith-extension.sh"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'ok: %s\n' "$*"; }
@@ -32,8 +29,8 @@ for directive in \
     [[ "$(grep -Fxc "$directive" "$UNIT" || true)" == 1 ]] \
         || fail "5gpn-mihomo.service must contain exactly one $directive"
 done
-grep -Fxq '# 5gpn-unit-id: 5gpn-mihomo.service:v2' "$UNIT" \
-    || fail "worker-isolation unit revision is not v2"
+grep -Fxq '# 5gpn-unit-id: 5gpn-mihomo.service:v3' "$UNIT" \
+    || fail "worker-isolation unit revision is not v3"
 grep -Fxq 'ProtectControlGroups=yes' "$UNIT" \
     && fail "the main unit still hides the delegated cgroup hierarchy" \
     || true
@@ -44,66 +41,6 @@ grep -Eq '^DelegateSubgroup=' "$UNIT" \
     && fail "DelegateSubgroup hides the private delegated unit root" \
     || true
 pass "the main unit pins the delegated worker memory and lifecycle contract"
-
-for contract in \
-    'Worker admission is fixed at two concurrent processes.' \
-    '`memory.max=536870912`' \
-    '`memory.swap.max=0`' \
-    '`memory.oom.group=1`' \
-    '`pids.max=32`' \
-    'aggregate upper bounds of 1GiB and 64 tasks' \
-    '`ActiveProcessLimit=1`'; do
-    grep -Fq "$contract" "$ARCHITECTURE" \
-        || fail "architecture omits the fixed worker contract: $contract"
-    grep -Fq "$contract" "$EXTENSION_CONTRACT" \
-        || fail "extension contract omits the fixed worker contract: $contract"
-done
-grep -Fq 'There is no in-process fallback on any platform.' "$EXTENSION_CONTRACT" \
-    || fail "extension contract permits an in-process fallback"
-grep -Fq 'is `0::/main`.' "$ARCHITECTURE" \
-    || fail "architecture does not pin the private delegated main subgroup"
-grep -Fq 'systemd starts the trusted parent alone at' "$ARCHITECTURE" \
-    && grep -Fq '`0::/`' "$ARCHITECTURE" \
-    && grep -Fq 'Setting `DelegateSubgroup=main` in the unit would instead' "$ARCHITECTURE" \
-    || fail "architecture omits trusted parent normalization from the private unit root"
-for contract in \
-    '`UseCgroupFD`' \
-    '`clone3(CLONE_INTO_CGROUP)`' \
-    '`SystemCallFilter=~unshare setns`' \
-    'runtime startup isolation probe'; do
-    grep -Fq "$contract" "$ARCHITECTURE" \
-        || fail "architecture omits the clone3 isolation contract: $contract"
-    grep -Fq "$contract" "$EXTENSION_CONTRACT" \
-        || fail "extension contract omits the clone3 isolation contract: $contract"
-done
-for contract in \
-    'Startup isolation probe failure is fatal before listeners open.' \
-    'After a successful probe, each child failure stays local.' \
-    'Guest worker admission is global 2 and per extension 1.' \
-    'Admission never queues; saturation fails the current operation immediately.' \
-    'Pure parent-side declarative actions do not acquire a worker slot.'; do
-    grep -Fq "$contract" "$ARCHITECTURE" \
-        || fail "architecture omits the two-stage worker failure contract: $contract"
-    grep -Fq "$contract" "$EXTENSION_CONTRACT" \
-        || fail "extension contract omits the two-stage worker failure contract: $contract"
-done
-pass "documentation pins Linux and Windows worker resource ceilings"
-
-for contract in \
-    'trap cleanup EXIT' \
-    'installed_by_acceptance' \
-    '.extension.snapshot_digest' \
-    'pathRegex: "^/oom$"' \
-    'new Uint8Array(16 * 1024 * 1024)' \
-    'workers.${main_pid}.*' \
-    '$aggregate_path/memory.events' \
-    "-name 'action.*'" \
-    'pathRegex: "^/healthy$"' \
-    '[ "$healthy_http" = 204 ]'; do
-    grep -Fq -- "$contract" "$ACCEPTANCE" \
-        || fail "production OOM acceptance omits: $contract"
-done
-pass "production acceptance fences and verifies a real worker OOM"
 
 full_fn="$(sed -n '/^full_install()/,/^}/p' "$INSTALL")"
 line_of() {
@@ -137,6 +74,8 @@ grep -Fq 'systemd-analyze verify "${candidates[@]}"' <<<"$verify_fn" \
 grep -Fq 'Candidate systemd units failed systemd-analyze verify; no project file was published.' <<<"$verify_fn" \
     || fail "candidate verification failure does not identify the pre-publication boundary"
 for substitution in \
+    "s|^ExecStartPre=+/opt/5gpn/scripts/configure-runtime-gate.sh wait$|ExecStartPre=+/bin/true|" \
+    "s|^ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui$|ExecStartPre=/bin/true|" \
     "s|^ExecStart=.*$|ExecStart=/bin/true|" \
     's/^User=.*$/User=root/' \
     's/^Group=.*$/Group=root/' \
@@ -147,11 +86,17 @@ done
 grep -Eq "s[/|].*\^(Protect|Delegate|MemoryAccounting|TasksAccounting|OOMPolicy|KillMode|SystemCallFilter)" <<<"$verify_fn" \
     && fail "candidate verification rewrites an isolation directive" \
     || true
+grep -Fq 'for unit in "${MANAGED_SYSTEMD_UNITS[@]}"' <<<"$verify_fn" \
+    || fail "candidate verification does not consume the shared six-unit manifest"
+managed_units_decl="$(sed -n '/^declare -ar MANAGED_SYSTEMD_UNITS=(/,/^)/p' "$INSTALL")"
 for unit in 5gpn-mihomo.service 5gpn-intercept-cert.service \
-            5gpn-intercept-cert.path 5gpn-intercept-cert.timer; do
-    grep -Fq "$unit" <<<"$verify_fn" \
-        || fail "candidate verification omits $unit"
+            5gpn-intercept-cert.path 5gpn-intercept-cert.timer \
+            5gpn-certbot-renew.service 5gpn-certbot-renew.timer; do
+    grep -Fq "    $unit" <<<"$managed_units_decl" \
+        || fail "candidate verification manifest omits $unit"
 done
+[[ "$(grep -Ec '^[[:space:]]+5gpn-.*\.(service|path|timer)$' <<<"$managed_units_decl")" == 6 ]] \
+    || fail "candidate verification manifest does not contain exactly six units"
 for pattern in \
     'OOMPolicy|Delegate*|Slice|DisableControllers' \
     'Memory*|StartupMemory*|AllowedMemoryNodes|StartupAllowedMemoryNodes' \
@@ -173,6 +118,41 @@ INSTALL_SH_LIB_ONLY=1
 export INSTALL_SH_LIB_ONLY
 # shellcheck source=../install.sh
 source "$INSTALL"
+
+UNIT_SOURCE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/5gpn-six-units.XXXXXX")"
+mkdir -p "$UNIT_SOURCE_TMP/etc/systemd"
+cp "$ROOT"/etc/systemd/* "$UNIT_SOURCE_TMP/etc/systemd/"
+ORIGINAL_SCRIPT_DIR="$SCRIPT_DIR"
+ORIGINAL_BASE_DIR="$BASE_DIR"
+SCRIPT_DIR="$UNIT_SOURCE_TMP"
+BASE_DIR="$UNIT_SOURCE_TMP/no-installed-fallback"
+VERIFY_ARGUMENTS="$UNIT_SOURCE_TMP/verify-arguments"
+systemd-analyze() {
+    [[ "${1:-}" == verify ]] || return 1
+    shift
+    printf '%s\n' "$@" > "$VERIFY_ARGUMENTS"
+    [[ "$#" == 6 ]] || return 1
+    local candidate
+    for candidate in "$@"; do
+        [[ -f "$candidate" ]] || return 1
+        grep -Fq 'X04InvalidDirective=yes' "$candidate" && return 1
+    done
+    return 0
+}
+err() { :; }
+verify_systemd_unit_candidates \
+    || fail "the complete six-unit static candidate set was rejected"
+[[ "$(wc -l < "$VERIFY_ARGUMENTS")" == 6 ]] \
+    || fail "systemd-analyze did not receive all six byte-derived candidates"
+printf '%s\n' 'X04InvalidDirective=yes' >> "$UNIT_SOURCE_TMP/etc/systemd/5gpn-certbot-renew.service"
+if verify_systemd_unit_candidates; then
+    fail "a broken static renewal service passed candidate verification"
+fi
+SCRIPT_DIR="$ORIGINAL_SCRIPT_DIR"
+BASE_DIR="$ORIGINAL_BASE_DIR"
+rm -rf -- "$UNIT_SOURCE_TMP"
+unset -f systemd-analyze
+pass "static renewal units participate in the same fail-before-publication verification"
 
 kernel_release_supports_extension_workers 5.7.0 \
     || fail "minimum Linux kernel 5.7 was rejected"

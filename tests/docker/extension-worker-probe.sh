@@ -155,13 +155,21 @@ candidate_digest="$(jq -er \
     '.candidate.digest as $digest |
      select($digest | test("^[0-9a-f]{64}$")) |
      select((.candidate.installed // "") == "") |
+     select(.candidate.detail.review_contract == 7) |
      select(.candidate.detail.capture_hosts == [$host]) |
+     select((.candidate.detail.actions | map(.id)) == ["memory-bomb","healthy"]) |
+     select(all(.candidate.detail.actions[];
+       .kind == "script" and .source_kind == "inline" and
+       (.code_digest | test("^[0-9a-f]{64}$")) and .code_bytes > 0 and
+       (.review_digest | test("^[0-9a-f]{64}$")) and
+       (has("script") | not) and (has("source") | not))) |
      $digest' <<<"$review")"
 
 install_attempted=true
 install="$(api_request POST /5gpn/interception/extensions \
     "$(jq -nc --arg revision "$review_revision" --arg digest "$candidate_digest" \
-        --arg content "$manifest" '{revision:$revision,digest:$digest,content:$content}')")"
+        --arg content "$manifest" \
+        '{revision:$revision,review_contract:7,digest:$digest,content:$content}')")"
 installed=true
 jq -e --arg id "$extension_id" --arg digest "$candidate_digest" '
   (.snapshot.modules[] | select(.id == $id) | .enabled) == false and
@@ -183,7 +191,8 @@ if [[ "$master_before" != true ]]; then
 fi
 
 enable="$(api_request PUT "/5gpn/interception/extensions/${extension_id}/enabled" \
-    "$(jq -nc --arg revision "$(current_revision)" '{revision:$revision,enabled:true}')")"
+    "$(jq -nc --arg revision "$(current_revision)" \
+        '{revision:$revision,review_contract:7,enabled:true}')")"
 enabled_revision="$(jq -er .revision <<<"$enable")"
 jq -e --arg id "$extension_id" '
   (.snapshot.modules[] | select(.id == $id) | .enabled) == true and
@@ -205,9 +214,12 @@ jq -e --arg host "$capture_host" --arg before "$digest_before" '
 ready=''
 for _ in $(seq 1 240); do
     current="$(api_request GET /5gpn/interception)"
-    if jq -e --arg id "$extension_id" --arg revision "$enabled_revision" '
+    if jq -e --arg id "$extension_id" --arg host "$capture_host" \
+        --arg revision "$enabled_revision" '
       .revision == $revision and .snapshot.certificate.status == "ready" and
-      (.snapshot.modules[] | select(.id == $id) | .runtime.phase) == "active"
+      (.snapshot.modules[] | select(.id == $id) | .runtime.ready) == true and
+      (.snapshot.modules[] | select(.id == $id) | .runtime.phase) == "active" and
+      .snapshot.active_capture_hosts == [$host]
     ' <<<"$current" >/dev/null; then
         ready="$current"
         break
@@ -347,8 +359,12 @@ done
     || probe_die 'a fresh isolated worker did not execute after the OOM'
 
 detail="$(api_request GET "/5gpn/interception/extensions/${extension_id}")"
-[[ "$(jq -er '.extension.snapshot_digest' <<<"$detail")" == "$candidate_digest" ]] \
-    || probe_die 'owned extension digest changed before cleanup'
+jq -e --arg digest "$candidate_digest" '
+  .extension.snapshot_digest == $digest and .extension.review_contract == 7 and
+  (.extension.actions | map(.id)) == ["memory-bomb","healthy"] and
+  all(.extension.actions[]; (.review_digest | test("^[0-9a-f]{64}$")))
+' <<<"$detail" >/dev/null \
+    || probe_die 'owned extension review contract or digest changed before cleanup'
 delete="$(api_request DELETE "/5gpn/interception/extensions/${extension_id}" \
     "$(jq -nc --arg revision "$(jq -er .revision <<<"$detail")" '{revision:$revision}')")"
 jq -e --arg id "$extension_id" \

@@ -185,11 +185,12 @@ jobs:
           ACCEPTED_IMAGE_ID: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID }}
         run: |
           set -euo pipefail
-          pinned_sha="$(sed -n 's/^MIHOMO_SHA256="\([0-9a-f]*\)".*/\1/p' install.sh)"
+          source release/pins.sh
+          load_release_pins release/pins.env
+          pinned_sha="$(release_artifact_sha256 mihomo)"
           event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          [[ "$pinned_sha" =~ ^[0-9a-f]{64}$ \
-             && "$(grep -c '^MIHOMO_SHA256=' install.sh)" == 1 ]] \
-            || { echo "install.sh does not contain one exact mihomo digest." >&2; exit 1; }
+          [[ "$pinned_sha" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "release/pins.env does not provide one exact mihomo digest." >&2; exit 1; }
           [[ "$ACCEPTED_COMMIT" == "$event_commit" ]] \
             || { echo "test-env has not accepted exact commit $event_commit." >&2; exit 1; }
           [[ "$ACCEPTED_MIHOMO_SHA256" == "$pinned_sha" ]] \
@@ -213,9 +214,9 @@ jobs:
           [[ ! -e "$stage" ]] \
             || { echo "Refusing to reuse existing bundle stage: $stage" >&2; exit 1; }
 
-          # This is the complete installer-bundle policy. Runtime helpers and
-          # one-shot upgrade tools are listed individually so a repository-only
-          # helper cannot become gateway payload by merely landing in scripts/.
+          # This is the complete installer-bundle policy. Runtime helpers are
+          # listed individually so a repository-only helper cannot become
+          # gateway payload by merely landing in scripts/.
           # scripts/run-suites.sh is a development-only test runner and must not
           # ship in a release bundle.
           bundle_files=(
@@ -228,45 +229,55 @@ jobs:
             compose.yaml
             docker/seccomp-5gpn.json
             docker/bootstrap/config.env.example
+            # Centralized third-party coordinates and their non-executing parser.
+            release/pins.env
+            release/pins.sh
+            # Public contract for the exact six-key installer-input schema.
             etc/5gpn/dns.env.example
             etc/mihomo/config.yaml.tmpl
+            etc/systemd/5gpn-certbot-renew.service
+            etc/systemd/5gpn-certbot-renew.timer
             etc/systemd/5gpn-intercept-cert.path
             etc/systemd/5gpn-intercept-cert.service
             etc/systemd/5gpn-intercept-cert.timer
             etc/systemd/5gpn-mihomo.service
             # Runtime helpers installed under /opt/5gpn/scripts.
+            scripts/publication-fs.sh
+            scripts/cert-role-ctl.sh
             scripts/cert-renew.sh
+            scripts/configure-runtime-gate.sh
             scripts/gen-ios-profile.sh
             scripts/intercept-cert-renew.sh
             scripts/renew-hook.sh
-            # Explicit operator upgrade and migration tools.
-            scripts/migrate-panel-to-console.sh
-            scripts/migrate-state-to-monolith.sh
-            scripts/migrate-to-monolith.sh
+            scripts/ui-generation.sh
             docs/architecture.md
             docs/docker.md
             docs/native-extensions.md
-            docs/pre-v5-upgrade.md
             tests/container-acceptance.sh
             tests/docker/probe-lib.sh
             tests/docker/extension-worker-probe.sh
             tests/docker/public-certificate-hot-reload.sh
             tests/docker/recreate-container.sh
+            # Acceptance routing and root-owned runbooks; no executable mega-suite.
             tests/integration-smoke.md
+            tests/deployment-smoke.md
+            tests/acceptance/installer.md
+            tests/acceptance/disruption-recovery.md
           )
           executable_files=(
             install.sh
             quick-install.sh
+            scripts/publication-fs.sh
+            scripts/cert-role-ctl.sh
             scripts/cert-renew.sh
+            scripts/configure-runtime-gate.sh
             scripts/gen-ios-profile.sh
             scripts/intercept-cert-renew.sh
             scripts/renew-hook.sh
-            scripts/migrate-panel-to-console.sh
-            scripts/migrate-state-to-monolith.sh
-            scripts/migrate-to-monolith.sh
             tests/container-acceptance.sh
             tests/docker/extension-worker-probe.sh
             tests/docker/recreate-container.sh
+            scripts/ui-generation.sh
           )
 
           mkdir -p "$stage"
@@ -277,6 +288,16 @@ jobs:
             chmod 0755 "$stage/$file"
           done
 
+          pins_env_sha="$(sha256sum "$stage/release/pins.env" | awk '{print $1}')"
+          pins_library_sha="$(sha256sum "$stage/release/pins.sh" | awk '{print $1}')"
+          quick_sha="$(sha256sum "$stage/quick-install.sh" | awk '{print $1}')"
+          pins_binding="${pins_env_sha}:${pins_library_sha}"
+          sed -i "s/^RELEASE_PINS_BINDING=.*/RELEASE_PINS_BINDING=\"${pins_binding}\"/" "$stage/install.sh"
+          grep -q "^RELEASE_PINS_BINDING=\"${pins_binding}\"$" "$stage/install.sh" \
+            || { echo "RELEASE_PINS_BINDING stamp failed"; exit 1; }
+          sed -i "s/^RELEASE_QUICK_BINDING=.*/RELEASE_QUICK_BINDING=\"${quick_sha}\"/" "$stage/install.sh"
+          grep -q "^RELEASE_QUICK_BINDING=\"${quick_sha}\"$" "$stage/install.sh" \
+            || { echo "RELEASE_QUICK_BINDING stamp failed"; exit 1; }
           sed -i "s/^RELEASE_TAG=.*/RELEASE_TAG=\"${GITHUB_REF_NAME}\"/" "$stage/install.sh"
           grep -q "^RELEASE_TAG=\"${GITHUB_REF_NAME}\"" "$stage/install.sh" \
             || { echo "RELEASE_TAG stamp failed"; exit 1; }
@@ -308,15 +329,15 @@ jobs:
           sha256sum 5gpn-installer.tar.gz > checksums.txt
 
       # The OCI image is a registry artifact, never a fourth GitHub Release
-      # asset. Component preparation reads the tagged install.sh rather than a
-      # parallel Docker lock file and verifies both upstream digests before the
+      # asset. Component preparation reads the tagged release/pins.env through
+      # its strict parser rather than a parallel Docker lock file and verifies both upstream digests before the
       # Docker build can see either artifact.
       - name: Prepare digest-pinned Docker components
         run: |
           set -euo pipefail
           bash docker/prepare-components.sh
           grep -Fxq 'MIHOMO_SOURCE=pinned-release' docker/build/components/manifest.env
-          grep -Fxq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v1' \
+          grep -Fxq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v2' \
             docker/build/components/manifest.env
 
       - name: Start pinned reproducible BuildKit builder
@@ -348,6 +369,9 @@ jobs:
             docker/docker-intercept-cert.sh
             docker/build
             etc/mihomo/config.yaml.tmpl
+            scripts/publication-fs.sh
+            scripts/cert-role-ctl.sh
+            scripts/ui-generation.sh
             scripts/gen-ios-profile.sh
           )
           for input in "${context_inputs[@]}"; do

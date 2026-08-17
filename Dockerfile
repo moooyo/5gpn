@@ -29,8 +29,8 @@ LABEL org.opencontainers.image.title="5gpn" \
 COPY --chmod=0644 docker/build/components/bootstrap-ca.pem /etc/ssl/certs/ca-certificates.crt
 
 # GitHub release assets are intentionally absent from this layer. They must
-# already exist below docker/build/components after their install.sh pins have
-# been checked by docker/prepare-components.sh.
+# already exist below docker/build/components after release/pins.env has been
+# parsed by release/pins.sh and checked by docker/prepare-components.sh.
 RUN printf '%s\n' \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie-updates main" \
@@ -72,10 +72,27 @@ RUN printf '%s\n' \
     && install -d -o 10001 -g 10001 -m 0750 \
         /etc/5gpn \
         /etc/5gpn/mihomo \
-        /etc/5gpn/mihomo/5gpn \
-        /opt/5gpn/ui \
         /run/5gpn \
         /run/5gpn-bootstrap \
+    && install -d -o 10001 -g 10001 -m 0711 \
+        /etc/5gpn/mihomo/5gpn \
+    && install -d -o 10001 -g 10001 -m 0755 \
+        /opt/5gpn/ui \
+        /opt/5gpn/ui/generations \
+    && install -d -o 10001 -g 10001 -m 0751 \
+        /etc/5gpn/cert \
+    && install -d -o 10001 -g 10001 -m 0750 \
+        /etc/5gpn/cert/dot \
+        /etc/5gpn/cert/dot/generations \
+        /etc/5gpn/cert/console \
+        /etc/5gpn/cert/console/generations \
+        /etc/5gpn/intercept \
+        /etc/5gpn/intercept/tls \
+    && install -d -o 10001 -g 10001 -m 0700 \
+        /etc/5gpn/intercept-ca \
+        /etc/5gpn/letsencrypt \
+        /etc/5gpn/letsencrypt/work \
+        /etc/5gpn/letsencrypt/log \
     && install -d -o root -g root -m 0755 \
         /opt/5gpn/bin \
         /opt/5gpn/scripts \
@@ -84,8 +101,33 @@ RUN printf '%s\n' \
         /usr/share/5gpn/ui \
         /usr/share/doc/5gpn \
     && printf '%s\n' '5gpn-config' > /etc/5gpn/.5gpn-owned \
-    && chown 10001:10001 /etc/5gpn/.5gpn-owned \
-    && chmod 0644 /etc/5gpn/.5gpn-owned
+    && printf '%s\n' '5gpn-docker-state-v2' > /etc/5gpn/.5gpn-docker-schema \
+    && printf '%s\n' '5gpn-cert-root-v1' > /etc/5gpn/cert/.5gpn-cert-root-owned \
+    && printf '%s\n' '5gpn-cert-role-v1:dot' > /etc/5gpn/cert/dot/.5gpn-cert-role-owned \
+    && printf '%s\n' '5gpn-cert-role-v1:console' > /etc/5gpn/cert/console/.5gpn-cert-role-owned \
+    && printf '%s\n' '5gpn-intercept-ca-v1' > /etc/5gpn/intercept-ca/.5gpn-intercept-ca-owned \
+    && printf '%s\n' '5gpn-docker-intercept-v1' > /etc/5gpn/intercept/.5gpn-docker-intercept-owned \
+    && printf '%s\n' '5gpn-docker-letsencrypt-v1' > /etc/5gpn/letsencrypt/.5gpn-docker-letsencrypt-owned \
+    && printf '%s\n' '5gpn-ui-generations' > /opt/5gpn/ui/.5gpn-zashboard-owned \
+    && chown 10001:10001 \
+        /etc/5gpn/.5gpn-owned /etc/5gpn/.5gpn-docker-schema \
+        /etc/5gpn/cert/.5gpn-cert-root-owned \
+        /etc/5gpn/cert/dot/.5gpn-cert-role-owned \
+        /etc/5gpn/cert/console/.5gpn-cert-role-owned \
+        /etc/5gpn/intercept-ca/.5gpn-intercept-ca-owned \
+        /etc/5gpn/intercept/.5gpn-docker-intercept-owned \
+        /etc/5gpn/letsencrypt/.5gpn-docker-letsencrypt-owned \
+        /opt/5gpn/ui/.5gpn-zashboard-owned \
+    && chmod 0644 \
+        /etc/5gpn/.5gpn-owned /etc/5gpn/.5gpn-docker-schema \
+        /etc/5gpn/cert/.5gpn-cert-root-owned \
+        /etc/5gpn/cert/dot/.5gpn-cert-role-owned \
+        /etc/5gpn/cert/console/.5gpn-cert-role-owned \
+        /etc/5gpn/intercept-ca/.5gpn-intercept-ca-owned \
+        /opt/5gpn/ui/.5gpn-zashboard-owned \
+    && chmod 0600 \
+        /etc/5gpn/intercept/.5gpn-docker-intercept-owned \
+        /etc/5gpn/letsencrypt/.5gpn-docker-letsencrypt-owned
 
 COPY --chmod=0755 docker/build/components/5gpn-mihomo /opt/5gpn/bin/5gpn-mihomo
 COPY --chmod=0644 docker/build/components/manifest.env /usr/share/5gpn/components.env
@@ -93,6 +135,9 @@ COPY docker/build/components/ui/ /usr/share/5gpn/ui/
 COPY --chmod=0644 etc/mihomo/config.yaml.tmpl /usr/share/5gpn/config.yaml.tmpl
 COPY --chmod=0755 docker/docker-public-cert.sh /opt/5gpn/scripts/docker-public-cert.sh
 COPY --chmod=0755 docker/docker-intercept-cert.sh /opt/5gpn/scripts/docker-intercept-cert.sh
+COPY --chmod=0755 scripts/publication-fs.sh /opt/5gpn/scripts/publication-fs.sh
+COPY --chmod=0755 scripts/cert-role-ctl.sh /opt/5gpn/scripts/cert-role-ctl.sh
+COPY --chmod=0755 scripts/ui-generation.sh /opt/5gpn/scripts/ui-generation.sh
 COPY --chmod=0755 scripts/gen-ios-profile.sh /opt/5gpn/scripts/gen-ios-profile.sh
 COPY --chmod=0755 docker/entrypoint.sh /opt/5gpn/bin/docker-entrypoint.sh
 COPY --chmod=0644 LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/5gpn/
@@ -104,6 +149,6 @@ ENV FIVEGPN_RUNTIME=container \
 
 USER 10001:10001
 WORKDIR /etc/5gpn/mihomo
-VOLUME ["/etc/5gpn"]
+VOLUME ["/etc/5gpn", "/opt/5gpn/ui"]
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/opt/5gpn/bin/docker-entrypoint.sh"]

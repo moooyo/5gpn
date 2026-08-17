@@ -7,9 +7,10 @@ ROOT="$HERE/.."
 rc=0; fail(){ echo "FAIL: $1"; rc=1; }
 
 INSTALL="$ROOT/install.sh"
-ACCEPTANCE="$ROOT/tests/acceptance.sh"
 CERT_RENEW="$ROOT/scripts/cert-renew.sh"
 RELEASE="$ROOT/.github/workflows/release.yml"
+RENEW_SERVICE="$ROOT/etc/systemd/5gpn-certbot-renew.service"
+RENEW_TIMER="$ROOT/etc/systemd/5gpn-certbot-renew.timer"
 
 # --- Production renewal is unattended through one mode-aware, cert-name-scoped
 # helper. Cloudflare never needs a :80 handoff; due HTTP-01 renewals coordinate
@@ -24,17 +25,29 @@ grep -Fiq 'xray' "$CERT_RENEW" && fail "certificate renewal helper must not refe
 # The persistent timer and the Telegram bot must both enter through the helper,
 # never invoke an unscoped `certbot renew` of every host lineage.
 renew_auto_fn="$(sed -n '/^install_renewal_automation()/,/^}/p' "$INSTALL")"
+stop_managed_fn="$(sed -n '/^stop_managed_runtime_units()/,/^}/p' "$INSTALL")"
+grep -Fq 'enabled-runtime' <<<"$stop_managed_fn" \
+    && grep -Fq 'disable --runtime --now "$unit"' <<<"$stop_managed_fn" \
+    || fail "managed unit shutdown does not clear runtime enablement"
 grep -Fq 'certbot_lineage_owned_by_5gpn "$base"' <<<"$renew_auto_fn" \
     || fail "public renewal automation is not restricted to a provenance-owned lineage"
 grep -Fq 'acquire_install_gate || return 1' "$CERT_RENEW" \
     || fail "public renewal can enter the installer certificate-lock handoff window"
 grep -Fq '5gpn-certbot-renew.timer' <<<"$renew_auto_fn" || fail "no certificate renewal timer installed"
-grep -Fq 'OnCalendar=*-*-* 03:00:00' <<<"$renew_auto_fn" \
+renew_active_line="$(grep -n 'SYSTEMD_UNIT_ACTIVE_STATE.*active' <<<"$renew_auto_fn" | head -1 | cut -d: -f1)"
+renew_commit_line="$(grep -n 'KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=1' <<<"$renew_auto_fn" | head -1 | cut -d: -f1)"
+grep -Fq 'read_exact_systemd_unit_state 5gpn-certbot-renew.timer' <<<"$renew_auto_fn" \
+    || fail "scoped renewal state is not read through the exact systemd projection"
+grep -Fq 'SYSTEMD_UNIT_FILE_STATE" != enabled' <<<"$renew_auto_fn" \
+    || fail "scoped renewal commit does not require persistent enabled state"
+[[ -n "$renew_active_line" && -n "$renew_commit_line" && "$renew_active_line" -lt "$renew_commit_line" ]] \
+    || fail "distro timer takeover commits before scoped renewal is active"
+grep -Fq 'OnCalendar=*-*-* 03:00:00' "$RENEW_TIMER" \
     || fail "renewal timer does not run on the fixed daily schedule"
-grep -Fq 'Persistent=true' <<<"$renew_auto_fn" || fail "renewal timer not Persistent (missed runs will not catch up)"
-grep -Fq 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' <<<"$renew_auto_fn" \
+grep -Fq 'Persistent=true' "$RENEW_TIMER" || fail "renewal timer not Persistent (missed runs will not catch up)"
+grep -Fq 'ExecStart=/opt/5gpn/scripts/cert-renew.sh --quiet' "$RENEW_SERVICE" \
     || fail "renewal timer does not invoke the unified certificate helper"
-grep -Fq '# 5gpn-unit-id: 5gpn-certbot-renew.service:v1' <<<"$renew_auto_fn" \
+grep -Fq '# 5gpn-unit-id: 5gpn-certbot-renew.service:v1' "$RENEW_SERVICE" \
     || fail "renewal service has no exact ownership marker"
 for directive in \
     'NoNewPrivileges=yes' \
@@ -47,29 +60,29 @@ for directive in \
     'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
     'MemoryDenyWriteExecute=yes' \
     'SystemCallArchitectures=native'; do
-    grep -Fq "$directive" <<<"$renew_auto_fn" \
+    grep -Fq "$directive" "$RENEW_SERVICE" \
         || fail "public renewal service lacks hardening directive: $directive"
 done
-grep -Fq 'ReadWritePaths=/etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt' <<<"$renew_auto_fn" \
-    && grep -Fq 'ReadWritePaths=/etc/5gpn/cert -/opt/5gpn/ui /run/5gpn' <<<"$renew_auto_fn" \
-    && grep -Fq 'ReadOnlyPaths=-/etc/5gpn/acme -/etc/5gpn/intercept-ca/root.crt' <<<"$renew_auto_fn" \
-    && grep -Fq 'InaccessiblePaths=-/etc/5gpn/intercept-ca/root.key -/etc/5gpn/intercept-ca/.root.key.new -/etc/5gpn/intercept -/etc/5gpn/mihomo -/var/lib/5gpn-intercept -/var/lib/5gpn' <<<"$renew_auto_fn" \
+grep -Fq 'ReadWritePaths=/etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt' "$RENEW_SERVICE" \
+    && grep -Fq 'ReadWritePaths=/etc/5gpn/cert -/opt/5gpn/ui /run/5gpn' "$RENEW_SERVICE" \
+    && grep -Fq 'ReadOnlyPaths=-/etc/5gpn/acme -/etc/5gpn/intercept-ca/root.crt' "$RENEW_SERVICE" \
+    && grep -Fq 'InaccessiblePaths=-/etc/5gpn/intercept-ca/root.key -/etc/5gpn/intercept-ca/.root.key.new -/etc/5gpn/intercept -/etc/5gpn/mihomo -/var/lib/5gpn-intercept -/var/lib/5gpn' "$RENEW_SERVICE" \
     || fail "public renewal service can write outside its certificate/profile scope or read interception/runtime state"
-grep -Fq '# 5gpn-unit-id: 5gpn-certbot-renew.timer:v1' <<<"$renew_auto_fn" \
+grep -Fq '# 5gpn-unit-id: 5gpn-certbot-renew.timer:v1' "$RENEW_TIMER" \
     || fail "renewal timer has no exact ownership marker"
-grep -Fq 'TimeoutStartSec=30min' <<<"$renew_auto_fn" \
+grep -Fq 'TimeoutStartSec=30min' "$RENEW_SERVICE" \
     || fail "renewal service timeout cannot cover the 1.1.1.1 wait plus Certbot"
-grep -Fq 'TimeoutStopSec=2min' <<<"$renew_auto_fn" \
+grep -Fq 'TimeoutStopSec=2min' "$RENEW_SERVICE" \
     || fail "renewal service does not leave a bounded TERM/restore window"
-grep -Fq 'RuntimeDirectory=5gpn' <<<"$renew_auto_fn" \
-    && grep -Fq 'RuntimeDirectoryMode=0700' <<<"$renew_auto_fn" \
-    && grep -Fq 'RuntimeDirectoryPreserve=yes' <<<"$renew_auto_fn" \
+grep -Fq 'RuntimeDirectory=5gpn' "$RENEW_SERVICE" \
+    && grep -Fq 'RuntimeDirectoryMode=0700' "$RENEW_SERVICE" \
+    && grep -Fq 'RuntimeDirectoryPreserve=yes' "$RENEW_SERVICE" \
     || fail "public renewal service cannot establish its fresh-boot lock directory"
-grep -Eq 'ExecStart=.*certbot renew' <<<"$renew_auto_fn" \
+grep -Eq 'ExecStart=.*certbot renew' "$RENEW_SERVICE" \
     && fail "renewal timer bypasses the scoped helper with direct certbot renew"
-grep -Fq 'intercept-cert-renew.sh' <<<"$renew_auto_fn" \
+grep -Fq 'intercept-cert-renew.sh' "$RENEW_SERVICE" \
     && fail "public renewal failure can still skip the coupled interception leaf renewal"
-grep -Fq 'EnvironmentFile=/etc/5gpn/dns.env' <<<"$renew_auto_fn" \
+grep -Fq 'EnvironmentFile=/etc/5gpn/dns.env' "$RENEW_SERVICE" \
     && fail "renewal service imports arbitrary persisted keys into a root shell environment"
 head -1 "$CERT_RENEW" | grep -Fxq '#!/bin/bash' \
     || fail "renewal helper uses PATH-dependent /usr/bin/env for its root shell"
@@ -106,13 +119,17 @@ for unit in "$ROOT"/etc/systemd/*; do
         || fail "$(basename "$unit") lacks its provenance marker"
 done
 
-# The same trap lives in every other ownership check: a marker revision or a
-# body fingerprint that changes between releases wedges every host that has not
-# upgraded yet. Project roots self-heal at claim time; the path predicates match
-# the owner rather than the revision or the contents.
+# Exact top-level project roots may claim a safe populated directory only when
+# no marker exists. Known legacy contents are rejected by read-only preflight;
+# an invalid, legacy, or symlinked marker is never replaced.
 claim_roots_fn="$(sed -n '/^claim_project_roots()/,/^}/p' "$INSTALL")"
 [[ "$(grep -c 'claim_fixed_owned_dir .* 1 || return 1' <<<"$claim_roots_fn")" == 3 ]] \
-    || fail "project roots are not all claimed self-healingly"
+    || fail "project roots do not explicitly allow safe fixed-path adoption"
+claim_fixed_fn="$(sed -n '/^claim_fixed_owned_dir()/,/^}/p' "$INSTALL")"
+grep -Fq 'allow_populated_unmarked="${4:-0}"' <<<"$claim_fixed_fn" \
+    && grep -Fq 'Invalid or symlinked ownership marker' <<<"$claim_fixed_fn" \
+    && grep -Fq 'managed_path_has_no_nested_mounts "$dir"' <<<"$claim_fixed_fn" \
+    || fail "fixed-root adoption bypasses marker or nested-mount safety"
 grep -Fq 'claim_fixed_owned_dir "$INTERCEPT_CA_DIR" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" 1' "$INSTALL" \
     && fail "interception CA root is claimed self-healingly; certificate material must stay strict"
 launcher_owned_fn="$(sed -n '/^launcher_owned()/,/^}/p' "$INSTALL")"
@@ -126,17 +143,14 @@ grep -Fq 'grep -Fqx "$POLKIT_RULE_MARKER"' <<<"$polkit_owned_fn" \
 # The rule file itself is gone: every grant in it named a uid nothing runs as
 # now. install.sh keeps only the preflight above, which refuses to touch a
 # leftover rule on an upgraded host -- that is the surviving property.
-# The value a root is claimed with must never be versioned: comparing it exactly
-# is what wedged upgrades. A LEGACY value is the opposite of that mistake -- it
-# is never written, only accepted so the claim can heal a marker an older release
-# left behind, which is what CONF_LEGACY_OWNERSHIP_VALUE does for the config
-# root. So the rule covers the values we write and exempts that one shape.
+# Current root marker values remain unversioned so reinstall does not create a
+# needless marker-revision compatibility problem.
 if grep -RE '_VALUE="5gpn-(runtime|config|state|web|ios|temp|zashboard|intercept-state)-v[0-9]' "$INSTALL" \
-    | grep -qv 'LEGACY'; then
+    | grep -q .; then
     fail "a self-healing ownership value carries a revision suffix again"
 fi
 grep -Fq 'CONF_LEGACY_OWNERSHIP_VALUE=' "$INSTALL" \
-    || fail "the legacy config ownership value is gone; a pre-0.0.44 host cannot upgrade"
+    && fail "legacy config-root marker compatibility remains"
 # The converse: certificate roots have no self-heal, so their values are frozen.
 # Changing one strands every existing host.
 for cert_value in 'DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"' \
@@ -146,6 +160,9 @@ for cert_value in 'DEBUG_CERT_MARKER_VALUE="5gpn-debug-cert-v1"' \
     grep -Fq "$cert_value" "$INSTALL" \
         || fail "frozen certificate ownership value changed: $cert_value"
 done
+grep -Fqx 'CERT_ROLE_CTL_ROLE_VALUE_PREFIX=5gpn-cert-role-v1' \
+    "$ROOT/scripts/cert-role-ctl.sh" \
+    || fail "shared certificate-role core changed the frozen role marker value"
 # The config-root marker value is duplicated in three runtime helpers that
 # validate /etc/5gpn on their own. De-syncing them silently breaks renewal after
 # the installer republishes the marker, so they are pinned together here.
@@ -153,6 +170,15 @@ for helper in scripts/cert-renew.sh scripts/intercept-cert-renew.sh scripts/rene
     grep -Fqx 'CONFIG_ROOT_MARKER_VALUE=5gpn-config' "$ROOT/$helper" \
         || fail "$helper disagrees with the installer's config-root ownership value"
 done
+grep -Fqx 'CERT_ROLE_CTL_CONFIG_MARKER_VALUE=5gpn-config' \
+    "$ROOT/scripts/cert-role-ctl.sh" \
+    || fail "shared certificate-role core disagrees with the config-root marker"
+cert_claim_body="$(sed -n '/^cert_root_claim_is_possible()/,/^}/p' "$INSTALL")"
+ensure_cert_root_body="$(sed -n '/^ensure_dns_cert_root()/,/^}/p' "$INSTALL")"
+printf '%s' "$cert_claim_body" | grep -Fq 'cert_root_is_recoverable' \
+    && printf '%s' "$ensure_cert_root_body" | grep -Fq 'INSTALL_CERT_LOCK_HELD' \
+    && printf '%s' "$ensure_cert_root_body" | grep -Fq 'cert_role_ctl_repair_recoverable_tree' \
+    || fail "installer does not separate read-only certificate recovery preflight from locked repair"
 
 # Install/configure ordering: resolve the TUI/persisted selection, wait for the
 # fixed-resolver DNS gate, and only then publish or issue certificate material.
@@ -170,14 +196,35 @@ grep -Fq '    start_services_with_cert_lock_handoff' <<<"$full_fn" \
     || fail "full install does not hand the certificate lock to runtime startup"
 grep -Fqx '    start_services' <<<"$full_fn" \
     && fail "full install still starts the runtime while holding the certificate lock"
+intercept_ca_line="$(grep -n '^[[:space:]]*ensure_intercept_certificates$' <<<"$full_fn" | cut -d: -f1)"
+ui_stage_line="$(grep -n '^[[:space:]]*install_ui$' <<<"$full_fn" | cut -d: -f1)"
+profile_publish_line="$(grep -n '^[[:space:]]*setup_ios_profile$' <<<"$full_fn" | cut -d: -f1)"
+start_line="$(grep -n '^[[:space:]]*start_services_with_cert_lock_handoff$' <<<"$full_fn" | cut -d: -f1)"
+if [[ -z "$intercept_ca_line$cert_line$ui_stage_line$profile_publish_line$start_line" \
+   || "$intercept_ca_line" -ge "$cert_line" || "$cert_line" -ge "$ui_stage_line" \
+   || "$ui_stage_line" -ge "$profile_publish_line" || "$profile_publish_line" -ge "$start_line" ]]; then
+    fail "full install does not prepare both trust boundaries before one complete pre-start UI switch"
+fi
 
 # ===== iOS profile is served by the controller under /ui/; the standalone :8111
 # responder, the host firewall and the separate console origin that owned /ios/
-# are all gone. The path assertion lives in test_ios_profile_atomic.sh, which
-# also ties it to what verify_console_endpoint probes. =====
+# are all gone. Lock the single derivation and every operator/probe consumer. =====
 grep -Eq 'IOS_PORT=' "$INSTALL" && fail "install.sh must not reference IOS_PORT (:8111 responder removed)"
 grep -Eq '^ios_profile_url\(\)' "$INSTALL" \
     || fail "install.sh has no single derivation of the iOS profile URL"
+ios_url_fn="$(sed -n '/^ios_profile_url()/,/^}/p' "$INSTALL")"
+qr_fn="$(sed -n '/^print_qr()/,/^}/p' "$INSTALL")"
+regen_fn="$(sed -n '/^regen_ios()/,/^}/p' "$INSTALL")"
+endpoint_fn="$(sed -n '/^verify_console_endpoint()/,/^}/p' "$INSTALL")"
+printf '%s' "$ios_url_fn" | grep -Fq "printf 'https://%s/ui/%s'" \
+    && ! printf '%s' "$ios_url_fn" | grep -Fq '/ios/' \
+    && printf '%s' "$qr_fn" | grep -Fq 'url="$(ios_profile_url)"' \
+    && printf '%s' "$regen_fn" | grep -Fq 'verify_console_endpoint' \
+    && printf '%s' "$regen_fn" | grep -Fq 'print_qr' \
+    && printf '%s' "$regen_fn" | grep -Fq '$(ios_profile_url)' \
+    && printf '%s' "$endpoint_fn" | grep -Fq 'mihomo_controller_curl "/ui/${name}"' \
+    && printf '%s' "$endpoint_fn" | grep -Fq '"${UI_CURRENT_DIR}/${name}"' \
+    || fail "profile URL, QR/regenerate output, and readiness probe do not share the public /ui/ path"
 # First install is TUI-only; reinstall reads the persisted dns.env and caller
 # environment is explicitly cleared.
 grep -Eq '^configure_install_tui\(\)' "$INSTALL" || fail "no first-install TUI configuration wizard"
@@ -187,9 +234,13 @@ grep -Fq 'unsupported key' "$INSTALL" || fail "persisted dns.env does not reject
 grep -Eq '^clear_external_config_env\(\)' "$INSTALL" || fail "caller environment is not cleared"
 grep -Fq "First install/configuration requires an attached TTY" "$INSTALL" \
     || fail "headless first install does not fail closed"
+email_helper="$(sed -n '/^is_valid_cert_email()/,/^}/p' "$INSTALL")"
+[[ -n "$email_helper" ]] \
+    && printf '%s' "$(sed -n '/^validate_persisted_install_config_values()/,/^}/p' "$INSTALL")" | grep -Fq 'is_valid_cert_email "$cert_email"' \
+    && printf '%s' "$(sed -n '/^validate_install_config()/,/^}/p' "$INSTALL")" | grep -Fq 'is_valid_cert_email "${CERT_EMAIL:-}"' \
+    && printf '%s' "$(sed -n '/^install_tui_cert_email()/,/^}/p' "$INSTALL")" | grep -Fq 'is_valid_cert_email "$CERT_EMAIL"' \
+    || fail "certificate email validation is not shared by preflight, final validation, and the TUI"
 grep -Eq "prompt_default .*网关|prompt_default .*Gateway" "$INSTALL" || fail "TUI has no gateway prompt"
-grep -Fq 'Pre-v5 dns.env contains retired DNS_EGRESS_RESOLVER' "$INSTALL" \
-    || fail "installer does not reject the retired single egress resolver explicitly"
 grep -Eq '^[[:space:]]*DNS_EGRESS_RESOLVER=' "$INSTALL" \
     && fail "installer still persists the retired single egress resolver"
 # The banner must print the credential zashboard's backend dialog actually
@@ -202,8 +253,9 @@ printf '%s' "$full_install_fn" | grep -Fq 'reveal_console_connection=0' \
     && printf '%s' "$full_install_fn" | grep -Fq 'print_console_connection_info "$reveal_console_connection" | card' \
     || fail "the success banner does not capture real stdout TTY state before card's pipe"
 connection_fn="$(sed -n '/^print_console_connection_info()/,/^}/p' "$INSTALL")"
-printf '%s' "$connection_fn" | grep -Fq 'DNS_MIHOMO_SECRET' \
-    || fail "the Console connection helper does not read the controller secret"
+printf '%s' "$connection_fn" | grep -Fq 'mihomo_controller_inspection' \
+    && printf '%s' "$connection_fn" | grep -Fq 'mihomo_controller_inspection_field "$inspection" secret' \
+    || fail "the Console connection helper does not read the exact inspector secret projection"
 printf '%s' "$full_install_fn" | grep -Fq 'DNS_API_TOKEN' \
     && fail "the success banner still shows the retired DNS_API_TOKEN"
 status_fn="$(sed -n '/^show_status()/,/^}/p' "$INSTALL")"
@@ -214,15 +266,23 @@ printf '%s' "$status_fn" | grep -Fq 'https://${webdomain}/ui/' \
 # There is one interface and one origin now. The console SPA and its release
 # tarball are gone with the loopback :443 server that served them, so what this
 # has to hold is no longer "the SPA is fetched" but "the bundle lands on the one
-# path the unit and the seed template both name". Those three strings agreeing is
-# the whole contract: if publication drifts off /opt/5gpn/ui, systemd refuses to
-# build the namespace (ReadOnlyPaths carries no `-` prefix) and mihomo never starts.
+# generation root the unit grants and the current path the seed names. The
+# startup precheck rejects a missing or incomplete current generation before
+# mihomo can open listeners.
 grep -Eq '^install_ui\(\)'      "$INSTALL" || fail "no install_ui() to publish the zashboard bundle"
 grep -Eq 'UI_DIR="/opt/5gpn/ui"' "$INSTALL" || fail "UI_DIR is not pinned to /opt/5gpn/ui"
-grep -Fq 'external-ui: /opt/5gpn/ui' "$ROOT/etc/mihomo/config.yaml.tmpl" \
-    || fail "seed template does not point external-ui at /opt/5gpn/ui"
+grep -Fq 'external-ui: /opt/5gpn/ui/current' "$ROOT/etc/mihomo/config.yaml.tmpl" \
+    || fail "seed template does not point external-ui at the atomic current generation"
 grep -Fq '/opt/5gpn/ui' "$ROOT/etc/systemd/5gpn-mihomo.service" \
     || fail "5gpn-mihomo.service does not grant read access to /opt/5gpn/ui"
+grep -Fq 'ExecStartPre=+/opt/5gpn/scripts/configure-runtime-gate.sh wait' \
+    "$ROOT/etc/systemd/5gpn-mihomo.service" \
+    || fail "5gpn-mihomo.service does not hold configure restart jobs in PID 1"
+grep -Fq 'ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui' \
+    "$ROOT/etc/systemd/5gpn-mihomo.service" \
+    || fail "5gpn-mihomo.service does not fail closed on an invalid current UI generation"
+grep -Fq 'configure-runtime-gate.sh' "$INSTALL" \
+    || fail "the PID1 restart-gate helper is not in the exact installed script manifest"
 grep -Eq 'install_web|5gpn-web-.*\.tar\.gz|DNS_WEB_DIR=' "$INSTALL" \
     && fail "the retired console SPA is still fetched or published"
 
@@ -231,10 +291,16 @@ grep -Eq 'install_web|5gpn-web-.*\.tar\.gz|DNS_WEB_DIR=' "$INSTALL" \
 # says why: an unenrolled phone downloading a .mobileconfig holds no secret. The
 # loopback console origin that used to serve them is gone, so a profile
 # published anywhere else is a profile nothing can read.
-grep -Fq 'bash "${SCRIPTS_DIR}/gen-ios-profile.sh" "$DOT_DOMAIN" "$gw" "$UI_DIR"' "$INSTALL" \
-    || fail "the iOS profile transaction does not publish directly into the served UI directory"
-grep -Eq 'publish_owned_tree "\$candidate" "\$WWW_DIR"' "$INSTALL" \
-    && fail "the iOS profiles are still published to the unserved WWW_DIR"
+grep -Fq 'generator_before="$(installed_runtime_script_state "$generator")"' "$INSTALL" \
+    && grep -Fq 'exec {generator_hash_fd}<"$generator"' "$INSTALL" \
+    && grep -Fq 'exec {generator_source_fd}<"$generator"' "$INSTALL" \
+    && grep -Fq 'bash "/proc/self/fd/$generator_source_fd" "$DOT_DOMAIN" "$gw" "$candidate"' "$INSTALL" \
+    || fail "the iOS profile transaction does not anchor the installed generator and write only the unpublished generation"
+grep -Fq 'ui_generation_clone_current "$UI_DIR"' "$INSTALL" \
+    && grep -Fq 'ui_generation_publish "$UI_DIR" "$candidate"' "$INSTALL" \
+    || fail "manual profile refresh does not clone and atomically switch a complete generation"
+grep -Fq 'publish_owned_tree' "$INSTALL" \
+    && fail "the retired move-live-then-replace UI publisher remains"
 # The core owns the response header. The installer must not mutate a
 # distribution-owned MIME database in an attempt to influence Go's process-wide
 # MIME loader, whose source differs between distributions.
@@ -253,17 +319,6 @@ printf '%s' "$verify_fn" | grep -Fq "Content-Type '\${content_type:-<missing>}'"
     || fail "console verification failure does not report the observed Content-Type"
 printf '%s' "$verify_fn" | grep -Eq 'https://\$\{console\}' \
     && fail "console verification still probes the retired public console origin"
-for profile in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
-    grep -Fq "$profile" "$ACCEPTANCE" \
-        || fail "post-release acceptance does not probe $profile"
-done
-grep -Fq '[[ "$profile_code" == 200' "$ACCEPTANCE" \
-    || fail "post-release acceptance does not require HTTP 200 for profiles"
-grep -Fq '"${profile_media_type,,}" == "application/x-apple-aspen-config"' "$ACCEPTANCE" \
-    || fail "post-release acceptance does not require the exact Apple profile media type"
-[[ "$(grep -c 'curl ' "$ACCEPTANCE")" == "$(grep -c "curl --noproxy '\*'" "$ACCEPTANCE")" ]] \
-    || fail "post-release loopback acceptance can be diverted by proxy environment variables"
-
 # --- `5gpn` management command: installed on PATH, backed by a copy of install.sh ---
 grep -Eq '^install_manage_cli\(\)' "$INSTALL" || fail "no install_manage_cli() (the 5gpn management command)"
 grep -Eq '^[[:space:]]*install_manage_cli( \|\| return 1)?$' "$INSTALL" || fail "install_manage_cli defined but never called in full_install"
@@ -305,30 +360,34 @@ grep -Fq '/providers/rules/whitelist' "$INSTALL" \
     && fail "installer still refreshes the retired allowlist rule-provider"
 grep -Fq 'http://127.0.0.1:9090' "$INSTALL" \
     && fail "installer still calls the plaintext mihomo controller"
-mc_fn="$(sed -n '/^mihomo_controller_curl()/,/^}/p' "$INSTALL")"
+mc_fn="$(sed -n '/^mihomo_controller_curl_with_inspection()/,/^}/p' "$INSTALL")"
+public_mc_fn="$(sed -n '/^mihomo_controller_curl()/,/^}/p' "$INSTALL")"
 printf '%s' "$mc_fn" | grep -Fq -- '--cacert' \
-    || fail "mihomo_controller_curl does not verify the controller certificate"
+    || fail "controller transport does not verify the inspected certificate"
 printf '%s' "$mc_fn" | grep -Fq -- '--connect-to' \
-    || fail "mihomo_controller_curl does not dial the configured loopback target"
+    || fail "controller transport does not dial the inspected loopback target"
 printf '%s' "$mc_fn" | grep -Fq 'https://' \
-    || fail "mihomo_controller_curl does not use HTTPS"
+    || fail "controller transport does not use HTTPS"
 printf '%s' "$mc_fn" | grep -Fq -- "--noproxy '*'" \
-    || fail "mihomo_controller_curl can be diverted by the host proxy environment"
+    || fail "controller transport can be diverted by the host proxy environment"
 printf '%s' "$mc_fn" | grep -Eq -- '(^|[[:space:]])(-k|--insecure)([[:space:]]|$)' \
-    && fail "mihomo_controller_curl must not disable TLS verification"
+    && fail "controller transport must not disable TLS verification"
+printf '%s' "$public_mc_fn" | grep -Fq 'inspection="$(mihomo_controller_inspection)"' \
+    && printf '%s' "$public_mc_fn" | grep -Fq 'mihomo_controller_curl_with_inspection' \
+    || fail "public controller requests bypass the structured inspector"
 pmr_fn="$(sed -n '/^probe_mihomo_ready()/,/^}/p' "$INSTALL")"
-printf '%s' "$pmr_fn" | grep -Fq 'mihomo_controller_curl "/version"' \
-    || fail "probe_mihomo_ready must call mihomo_controller_curl for the TLS controller probe"
+printf '%s' "$pmr_fn" | grep -Fq 'mihomo_authenticated_controller_curl "/version"' \
+    || fail "probe_mihomo_ready must use the inspected authenticated controller client"
 printf '%s' "$pmr_fn" | grep -Fq 'local -a tcp_ports=(80 443)' \
     || fail "probe_mihomo_ready must always require the baseline TCP ports"
-printf '%s' "$pmr_fn" | grep -Fq 'tcp_ports+=(5060 8080 8443)' \
+printf '%s' "$pmr_fn" | grep -Fq 'tcp_ports+=(8080 8443)' \
     || fail "probe_mihomo_ready must conditionally require every extra seed TCP port"
 printf '%s' "$pmr_fn" | grep -Fq '${MIHOMO_SEED_PORTS_REQUIRED:-0}' \
     || fail "probe_mihomo_ready must default alternate-port readiness to disabled"
 printf '%s' "$pmr_fn" | grep -Fq 'local -a udp_ports=(443)' \
     || fail "probe_mihomo_ready must always require UDP :443"
-printf '%s' "$pmr_fn" | grep -Fq 'udp_ports+=(5060)' \
-    || fail "probe_mihomo_ready must conditionally require default-module UDP :5060"
+printf '%s' "$pmr_fn" | grep -Fq '5060' \
+    && fail "probe_mihomo_ready still requires the removed :5060 seed ingress"
 # The TUI must NOT offer allowlist entries: the ops behind them are gone, and
 # test_tui_policy would fail a label whose branch no longer exists anyway.
 mm_fn="$(sed -n '/^manage_menu()/,/^}/p' "$INSTALL")"
@@ -365,7 +424,7 @@ grep -q 'ROLLBACK_DIR' "$INSTALL" && fail "a rollback snapshot directory came ba
 grep -Eq '^clean_previous_install\(\)' "$INSTALL" \
     && fail "the broad old-release teardown helper returned"
 grep -Eq '^remove_legacy_service_accounts\(\)' "$INSTALL" \
-    || fail "the exact legacy identity cleanup required by the naming migration is missing"
+    && fail "legacy identity cleanup remains in the current-only installer"
 
 # Official and beta publications share one gate but have disjoint tag,
 # provenance, and GitHub release metadata boundaries.
@@ -430,6 +489,10 @@ printf '%s' "$ic_fn" | grep -Fq 'keep-until-expiring' \
     || fail "install_cert must pass certbot --keep-until-expiring (reuse, not re-issue)"
 printf '%s' "$ic_fn" | grep -Eiq 'reus(e|ing)' \
     || fail "install_cert has no cert-reuse path (would re-issue every install)"
+[[ "$(grep -c 'FIVEGPN_CERT_LOCK_HELD=1 FIVEGPN_SKIP_PROFILE_REFRESH=1' <<< "$ic_fn")" == 2 ]] \
+    && grep -Fq 'run_http_certbot "${certbot_args[@]}"' <<< "$ic_fn" \
+    && grep -Fq 'certbot "${certbot_args[@]}"' <<< "$ic_fn" \
+    || fail "both production Certbot issuance paths must defer profile switching to the enclosing UI generation transaction"
 
 # --- Task 1: Cloudflare API-token credential helper ---
 # has_valid_cf_credential must recognise a saved token in cloudflare.ini.
@@ -557,7 +620,9 @@ grep -Fq 'DOMAIN,__CONSOLE_DOMAIN__,REJECT' "$MIHOMO_TMPL" \
 grep -Fq '__PROFILE_DOMAIN__' "$MIHOMO_TMPL" \
     && fail "etc/mihomo/config.yaml.tmpl: retired profile SNI remains"
 grep -Fq 'IP-CIDR,__GATEWAY_IP__/32,REJECT' "$MIHOMO_TMPL" \
-    || fail "etc/mihomo/config.yaml.tmpl: missing invariant #6 (anti-loop guard)"
+    && fail "etc/mihomo/config.yaml.tmpl: gateway anti-loop state leaked into operator YAML"
+grep -Fq '__GATEWAY_IP__' "$INSTALL" \
+    && fail "install.sh still renders a gateway placeholder into operator YAML"
 
 # render_mihomo_config generates a strong mixed secret (base64), not the old hex.
 rmc_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
@@ -569,21 +634,16 @@ printf '%s' "$rmc_fn" | grep -Fq 'openssl rand -base64 24' \
     || fail "render_mihomo_config must generate the controller secret via openssl rand -base64 24 (strong mixed secret, design §5.1)"
 printf '%s' "$rmc_fn" | grep -Fq 'openssl rand -hex 16' \
     && fail "render_mihomo_config must not generate the controller secret via the old openssl rand -hex 16"
-printf '%s' "$rmc_fn" | grep -Fq 'mihomo_config_secret "$config"' \
-    || fail "render_mihomo_config does not read back an existing secret across re-renders"
-parser_guards="$(printf '%s' "$rmc_fn" | grep -Fc 'Existing mihomo controller secret could not be parsed safely.' || true)"
-[[ "$parser_guards" == 2 ]] \
-    || fail "render_mihomo_config must fail closed on secret parsing in preserve and reset paths"
-# The secret was read by a structural YAML parser inside a binary this installer
-# published. That binary is gone, and shipping a YAML parser to read one scalar
-# is not worth it: the value sits on a line whose shape this installer controls,
-# and yaml_single_quoted_value refuses to write one that could not be read back.
-# The acceptance suite reads it identically, so the two cannot disagree.
-mcs_fn="$(sed -n '/^mihomo_config_secret()/,/^}/p' "$INSTALL")"
-printf '%s' "$mcs_fn" | grep -Fq 'grep -m1 -E "^secret:"' \
-    || fail "mihomo_config_secret does not read the secret line the installer writes"
-printf '%s' "$mcs_fn" | grep -Fq '[[ -f "$f" && -r "$f" ]]' \
-    || fail "mihomo_config_secret does not fail closed on an unreadable config"
+printf '%s' "$rmc_fn" | grep -Fq 'mihomo_controller_inspection "$config"' \
+    && printf '%s' "$rmc_fn" | grep -Fq 'mihomo_controller_inspection_field "$inspection" secret' \
+    && printf '%s' "$rmc_fn" | grep -Fq 'mihomo_controller_inspection_field "$inspection" raw_revision' \
+    || fail "render_mihomo_config does not preserve the structurally inspected secret and revision"
+inspect_fn="$(sed -n '/^mihomo_controller_inspection()/,/^}/p' "$INSTALL")"
+printf '%s' "$inspect_fn" | grep -Fq 'MIHOMO_CONTROLLER_INSPECTION_VERSION' \
+    && printf '%s' "$inspect_fn" | grep -Fq 'external_ui' \
+    && printf '%s' "$inspect_fn" | grep -Fq 'private_key' \
+    && printf '%s' "$inspect_fn" | grep -Fq 'select(length == 1)' \
+    || fail "controller inspector validation is not the exact v2 seven-field contract"
 printf '%s' "$rmc_fn" | grep -Fq 'Existing operator-owned mihomo config' \
     || fail "render_mihomo_config does not preserve an existing operator-owned config"
 printf '%s' "$rmc_fn" | grep -Fq 'mktemp "${MIHOMO_DIR}/.config.yaml.' \

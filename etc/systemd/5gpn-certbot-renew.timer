@@ -1,0 +1,11 @@
+# 5gpn-unit-id: 5gpn-certbot-renew.timer:v1
+[Unit]
+Description=5gpn daily certbot renewal check
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

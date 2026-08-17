@@ -61,24 +61,28 @@ grep -Eq '^[[:space:]]*install_cert "\$BASE_DOMAIN"' "$INSTALL" \
 grep -Eq '^deploy_cert_roles\(\)' "$INSTALL" \
     || fail "install.sh: no deploy_cert_roles() (copies the selected certificate to dot/console)"
 deploy_roles="$(sed -n '/^deploy_cert_roles()/,/^}/p' "$INSTALL")"
-printf '%s' "$deploy_roles" | grep -Fq 'roles=(dot console)' \
-    || fail "install.sh: deploy_cert_roles does not enumerate exactly dot and console"
+printf '%s' "$deploy_roles" | grep -Fq 'cert_role_ctl_' \
+    && grep -Fq 'local -a roles=(dot console)' "$ROOT/scripts/cert-role-ctl.sh" \
+    || fail "install.sh: shared certificate publisher does not enumerate exactly dot and console"
 printf '%s' "$deploy_roles" | grep -Eq '(^|[^[:alnum:]_])web([^[:alnum:]_]|$)' \
     && fail "install.sh: deploy_cert_roles still publishes the retired web role"
 
-# ===== CERT_MODE=debug — self-signed WILDCARD + dismantles ACME machinery =====
+# ===== CERT_MODE=debug — self-signed WILDCARD + inactive scoped renewal =====
 dbg="$(sed -n '/^issue_selfsigned_wildcard()/,/^}/p' "$INSTALL")"
 printf '%s' "$dbg" | grep -Fq 'openssl req -x509' \
     || fail "install.sh: debug mode does not generate a self-signed cert (openssl req -x509)"
-printf '%s' "$dbg" | grep -Fq 'remove_owned_renew_hook' \
+ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
+printf '%s' "$ic" | grep -Fq 'remove_owned_renew_hook' \
     || fail "install.sh: debug branch does not ownership-gate deploy-hook removal"
-printf '%s' "$dbg" | grep -Fq 'remove_owned_renewal_automation' \
-    || fail "install.sh: debug branch does not ownership-gate renewal-unit removal"
-printf '%s' "$dbg" | grep -Eq 'systemctl disable --now 5gpn-certbot-renew|rm -f.*/5gpn-certbot-renew' \
-    && fail "install.sh: debug branch mutates renewal units outside the ownership gate"
+printf '%s' "$ic" | grep -Fq 'disable_scoped_renewal_timer' \
+    || fail "install.sh: debug branch does not disable the scoped renewal timer"
+disable_timer="$(sed -n '/^disable_scoped_renewal_timer()/,/^}/p' "$INSTALL")"
+printf '%s' "$disable_timer" | grep -Fq 'systemctl disable --now 5gpn-certbot-renew.timer' \
+    || fail "install.sh: inapplicable renewal does not stop and disable its timer"
+printf '%s' "$disable_timer" | grep -Eq 'remove_unit|rm -f.*/5gpn-certbot-renew' \
+    && fail "install.sh: debug or external mode deletes static renewal units"
 
 # ===== Production issuance: scoped Cloudflare DNS-01 or standalone HTTP-01 =====
-ic="$(sed -n '/^install_cert()/,/^}/p' "$INSTALL")"
 printf '%s' "$ic" | grep -Fq 'certbot_args=(certonly --cert-name "$base"' \
     || fail "install.sh: certificate issuance is not scoped to --cert-name \$base"
 printf '%s' "$ic" | grep -Fq -- '--dns-cloudflare' \
@@ -188,15 +192,16 @@ grep -Eq 'open_port80|close_port80' "$INSTALL" \
 RENEW="$ROOT/scripts/renew-hook.sh"
 grep -Fq 'RENEWED_LINEAGE' "$RENEW" || fail "renew-hook.sh: does not use RENEWED_LINEAGE"
 grep -Fq 'DNS_BASE_DOMAIN' "$RENEW" || fail "renew-hook.sh: does not match the lineage to DNS_BASE_DOMAIN"
-grep -Fq 'roles=(dot console)' "$RENEW" \
+grep -Fq 'cert_role_ctl_deploy_lineage' "$RENEW" \
+    && grep -Fq 'local -a roles=(dot console)' "$ROOT/scripts/cert-role-ctl.sh" \
     || fail "renew-hook.sh: does not deploy to both dot/console role dirs"
 grep -Eq 'roles=\([^)]*web' "$RENEW" \
     && fail "renew-hook.sh: still deploys the retired web certificate role"
 grep -Fq 'validate_cert_pair' "$RENEW" \
     || fail "renew-hook.sh: does not validate SANs and the certificate/private-key pair"
-grep -Fq 'mktemp -d "${dest}/generations/.new.XXXXXX"' "$RENEW" \
+grep -Fq 'mktemp -d "$role_root/generations/.new.XXXXXX"' "$ROOT/scripts/cert-role-ctl.sh" \
     || fail "renew-hook.sh: certificate generation is not same-directory staged"
-grep -Fq 'mv -Tf -- "${links[$i]}" "${dests[$i]}/current"' "$RENEW" \
+grep -Fq 'publication_fs_commit_relative_pointer "$role_root" current' "$ROOT/scripts/cert-role-ctl.sh" \
     || fail "renew-hook.sh: certificate pair is not atomically published"
 grep -Fq 'mihomo reloads the controller certificate files automatically' "$RENEW" \
     || fail "renew-hook.sh: missing mihomo controller certificate hot-reload contract"
@@ -204,9 +209,25 @@ grep -Eq 'systemctl (restart|reload) mihomo' "$RENEW" \
     && fail "renew-hook.sh: must not restart/reload mihomo for controller certificate renewal"
 grep -iq 'xray' "$RENEW" && fail "renew-hook.sh: must not reference xray (mihomo is the data plane)"
 grep -Fxq 'UI_DIR=/opt/5gpn/ui' "$RENEW" \
-    || fail "renew-hook.sh: live profile destination is not /opt/5gpn/ui"
-grep -Fq 'bash "$IOSGEN" "$DOT_DOMAIN" "$gw" "$UI_DIR"' "$RENEW" \
-    || fail "renew-hook.sh: renewed profiles are not re-signed directly into UI_DIR"
+    || fail "renew-hook.sh: stable UI generation root is not /opt/5gpn/ui"
+grep -Fq 'ui_generation_clone_current "$UI_DIR"' "$RENEW" \
+    && grep -Fq 'generator_before="$(bound_script_state "$IOSGEN" /opt/5gpn/scripts/gen-ios-profile.sh)"' "$RENEW" \
+    && grep -Fq 'exec {generator_hash_fd}<"$IOSGEN"' "$RENEW" \
+    && grep -Fq 'exec {generator_source_fd}<"$IOSGEN"' "$RENEW" \
+    && grep -Fq 'bash "/proc/self/fd/$generator_source_fd" "$DOT_DOMAIN" "$gw" "$candidate"' "$RENEW" \
+    && grep -Fq 'ui_generation_publish "$UI_DIR" "$candidate"' "$RENEW" \
+    || fail "renew-hook.sh: renewed profiles do not use anchored clone-sign-switch generation publication"
+grep -Fq 'FIVEGPN_PROFILE_ONLY_REFRESH' "$ROOT/scripts/cert-renew.sh" \
+    && grep -Fq 'profile_inputs_match_live' "$ROOT/scripts/cert-renew.sh" \
+    || fail "cert-renew.sh: matching role copies can permanently skip stale profile inputs"
+bound_ui_helper_fn="$(sed -n '/^bound_ui_helper_validate_current()/,/^}/p' "$ROOT/scripts/cert-renew.sh")"
+printf '%s' "$bound_ui_helper_fn" | grep -Fq '! -L "$UI_GENERATION_HELPER"' \
+    && printf '%s' "$bound_ui_helper_fn" | grep -Fq '0:0:755:1' \
+    && printf '%s' "$bound_ui_helper_fn" | grep -Fq 'exec {hash_fd}<"$UI_GENERATION_HELPER"' \
+    && printf '%s' "$bound_ui_helper_fn" | grep -Fq 'exec {source_fd}<"$UI_GENERATION_HELPER"' \
+    && printf '%s' "$bound_ui_helper_fn" | grep -Fq 'fd_digest=' \
+    && printf '%s' "$bound_ui_helper_fn" | grep -Fq 'bash "/proc/self/fd/$source_fd" validate-current' \
+    || fail "cert-renew.sh: current validation does not bind a fixed, non-linked installed UI helper"
 grep -Fq '/opt/5gpn/www' "$RENEW" \
     && fail "renew-hook.sh: retired /opt/5gpn/www profile destination remains"
 
@@ -219,34 +240,24 @@ grep -Fq 'stage_dir="$(mktemp -d "${OUTPUT_DIR}/.ios-profile.XXXXXX")"' "$IOSGEN
     || fail "gen-ios-profile.sh: profiles are not staged privately on the destination filesystem"
 grep -Fq 'mv -Tf -- "$staged_profile" "$profile_path"' "$IOSGEN" \
     && grep -Fq 'mv -Tf -- "$staged_intercept_profile" "$intercept_profile_path"' "$IOSGEN" \
-    || fail "gen-ios-profile.sh: signed profiles are not atomically renamed into place"
+    || fail "gen-ios-profile.sh: signed profiles are not placed in the unpublished candidate"
+grep -Fq 'dot_public_key_sha256=' "$IOSGEN" \
+    && ! grep -Fq 'dot_private_key_sha256=' "$IOSGEN" \
+    || fail "gen-ios-profile.sh: public profile manifest leaks or omits the signer public-key identity"
 # The configuration guide lives in the console SPA. The profile generator must
 # publish only the signed payload, never recreate a second landing-page bundle.
 grep -Eq '(index\.html|ios\.css|ios\.js)' "$IOSGEN" \
     && fail "gen-ios-profile.sh: standalone iOS landing assets must stay removed"
 
-# ===== rotate_token — the console credential, and the unit that serves it =====
-#
-# It rotated DNS_API_TOKEN and restarted 5gpn-dns: a credential nothing reads,
-# and a unit the monolith deleted, with the failure swallowed by 2>/dev/null. The
-# entry reported success while the panel's actual credential was untouched.
-rt="$(sed -n '/^rotate_token()/,/^}/p' "$INSTALL")"
-printf '%s' "$rt" | grep -Fq 'DNS_API_TOKEN' \
-    && fail "install.sh: rotate_token still rotates the retired DNS_API_TOKEN"
-printf '%s' "$rt" | grep -Fq '5gpn-dns' \
-    && fail "install.sh: rotate_token still restarts the deleted 5gpn-dns unit"
-printf '%s' "$rt" | grep -Fq 'persist_mihomo_secret' \
-    || fail "install.sh: rotate_token does not mirror the new secret into dns.env"
-printf '%s' "$rt" | grep -Fq 'systemctl restart 5gpn-mihomo.service' \
-    || fail "install.sh: rotate_token must restart 5gpn-mihomo (the secret is read when the router is built)"
-printf '%s' "$rt" | grep -Eq 'systemctl reload 5gpn-mihomo|kill -HUP' \
-    && fail "install.sh: rotate_token must not use reload/SIGHUP (insufficient for a secret change)"
-# The live config is rewritten atomically, or not at all: a half-written
-# config.yaml is a gateway that will not start.
-printf '%s' "$rt" | grep -Fq 'mktemp "${config}.XXXXXX"' \
-    || fail "install.sh: rotate_token does not stage the rotated config beside it"
-printf '%s' "$rt" | grep -Fq 'mv -f -- "$tmp" "$config"' \
-    || fail "install.sh: rotate_token does not publish the rotated config by rename"
+# ===== Controller secret ownership =====
+# The installer has no partial YAML writer. The complete operator file is the
+# only persistent source, and management reads it through the core inspector.
+grep -Eq '^rotate_token\(\)|^[[:space:]]*rotate-token\)' "$INSTALL" \
+    && fail "install.sh: partial controller-secret rotation remains"
+grep -Eq '^mihomo_config_secret\(\)|^persist_mihomo_secret\(\)|^set_dns_env_kv\(\)' "$INSTALL" \
+    && fail "install.sh: shell secret parser or dotenv mirror remains"
+grep -Eq '^mihomo_controller_inspection\(\)' "$INSTALL" \
+    || fail "install.sh: structured controller inspector wrapper is missing"
 
 # ===== Single config file: dns.env is the ONE source of truth =====
 # There must be NO per-key .state file read/write (a bare `.cache_size` mention in

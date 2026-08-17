@@ -9,6 +9,26 @@ FAIL=0
 pass() { echo "ok: $*"; }
 fail() { echo "FAIL: $*"; FAIL=1; }
 
+uninstall_fn="$(sed -n '/^uninstall()/,/^}/p' "$INSTALL")"
+runtime_removal_line="$(grep -nF 'remove_runtime_preserving_gum' <<<"$uninstall_fn" | head -1 | cut -d: -f1)"
+decommission_cleanup_order_ok=1
+for cleanup_call in \
+    'remove_owned_root "$DNS_CERT_DIR"' \
+    'remove_debug_cert_root' \
+    'remove_owned_child "$CONF_DIR"' \
+    'remove_fixed_owned_dir "$INTERCEPT_CA_DIR"'
+do
+    cleanup_line="$(grep -nF "$cleanup_call" <<<"$uninstall_fn" | head -1 | cut -d: -f1)"
+    [[ -n "$cleanup_line" && -n "$runtime_removal_line" \
+       && "$cleanup_line" -lt "$runtime_removal_line" ]] \
+        || decommission_cleanup_order_ok=0
+done
+if [[ "$decommission_cleanup_order_ok" == 1 ]]; then
+    pass "decommission keeps certificate publication helpers until role cleanup finishes"
+else
+    fail "decommission removes runtime helpers before certificate-role cleanup"
+fi
+
 export INSTALL_SH_LIB_ONLY=1
 # shellcheck source=../install.sh
 source "$INSTALL"
@@ -85,25 +105,15 @@ fi
 
 unit_conflicts="$TMP/systemd-conflicts"
 mkdir -p "$unit_conflicts"
-if ! journal_export_instances_clear "$unit_conflicts"; then
-    fail "empty systemd search root was treated as an exporter conflict"
-fi
-touch "$unit_conflicts/5gpn-journal@5gpn-dns.service"
-if journal_export_instances_clear "$unit_conflicts"; then
-    fail "pre-existing exact journal exporter instance was accepted"
-else
-    pass "exact journal exporter instance conflicts are rejected before legacy cleanup"
-fi
-rm -f -- "$unit_conflicts/5gpn-journal@5gpn-dns.service"
-mkdir "$unit_conflicts/5gpn-dns.service.d"
-if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts"; then
+mkdir "$unit_conflicts/5gpn-mihomo.service.d"
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
     pass "systemd unit drop-ins invalidate the project ownership fingerprint"
 else
     fail "systemd unit drop-in was ignored by ownership validation"
 fi
-rmdir "$unit_conflicts/5gpn-dns.service.d"
+rmdir "$unit_conflicts/5gpn-mihomo.service.d"
 mkdir "$unit_conflicts/5gpn-.service.d"
-if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts" \
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
    && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *5gpn-.service.d* ]]; then
     pass "systemd dash-prefix drop-ins invalidate managed unit ownership"
 else
@@ -116,23 +126,112 @@ cat > "$unit_conflicts/service.d/10-host-defaults.conf" <<'EOF'
 [Service]
 TimeoutStopSec=90s
 EOF
-if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts"; then
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
     fail "unrelated global service default was treated as an execution override"
 else
     pass "unrelated global service defaults remain compatible"
 fi
+cat > "$unit_conflicts/service.d/15-start-timeout.conf" <<'EOF'
+[Service]
+TimeoutStartSec=90s
+EOF
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *global*service.d* ]]; then
+    pass "global start-timeout overrides cannot truncate the PID1 configure gate"
+else
+    fail "global service TimeoutStartSec override was ignored"
+fi
+rm -f -- "$unit_conflicts/service.d/15-start-timeout.conf"
 cat > "$unit_conflicts/service.d/20-exec.conf" <<'EOF'
 [Service]
 ExecStart=
 ExecStart=/tmp/not-5gpn
 EOF
-if systemd_unit_has_dropins 5gpn-dns.service "$unit_conflicts" \
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
    && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *global*service.d* ]]; then
     pass "global service execution overrides invalidate managed unit ownership"
 else
     fail "global service ExecStart override was ignored"
 fi
 rm -f -- "$unit_conflicts/service.d/20-exec.conf"
+cat > "$unit_conflicts/service.d/20-success-status.conf" <<'EOF'
+[Service]
+SuccessExitStatus=1 143
+EOF
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *global*service.d* ]]; then
+    pass "global success-status overrides cannot turn gate refusal into service success"
+else
+    fail "global service SuccessExitStatus override was ignored"
+fi
+rm -f -- "$unit_conflicts/service.d/20-success-status.conf"
+cat > "$unit_conflicts/service.d/20-continuation.conf" <<'EOF'
+[Service]
+ExecStartPre\
+=
+EOF
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+    pass "global systemd continuations cannot hide a gate-reset directive"
+else
+    fail "a continued global ExecStartPre reset bypassed override detection"
+fi
+rm -f -- "$unit_conflicts/service.d/20-continuation.conf"
+unit_gate_override_ok=1
+for key in \
+    RefuseManualStart RefuseManualStop JobTimeoutSec JobRunningTimeoutSec \
+    JobTimeoutAction JobTimeoutRebootArgument FailureAction OnFailure \
+    ConditionPathExists AssertPathExists Upholds; do
+    printf '[Unit]\n%s=fixture\n' "$key" \
+        > "$unit_conflicts/service.d/20-unit-gate.conf"
+    if ! systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+        fail "global unit gate override was ignored: $key"
+        unit_gate_override_ok=0
+    fi
+done
+rm -f -- "$unit_conflicts/service.d/20-unit-gate.conf"
+if [[ "$unit_gate_override_ok" == 1 ]]; then
+    pass "global Unit directives cannot cancel, bypass, or amplify the PID1 configure gate"
+fi
+printf '\357\273\277[Unit]\nFailureAction=reboot-force\n' \
+    > "$unit_conflicts/service.d/20-bom-unit.conf"
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+    pass "UTF-8 BOM cannot hide a global Unit override"
+else
+    fail "a BOM-prefixed global Unit section bypassed override detection"
+fi
+rm -f -- "$unit_conflicts/service.d/20-bom-unit.conf"
+printf '[Unit]   \nDescription=hidden-global-unit-directive\n' \
+    > "$unit_conflicts/service.d/20-trailing-space-unit.conf"
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+    pass "trailing whitespace cannot hide a global Unit override"
+else
+    fail "a whitespace-suffixed global Unit section bypassed override detection"
+fi
+rm -f -- "$unit_conflicts/service.d/20-trailing-space-unit.conf"
+for key in Alias Also; do
+    printf '[Install]\n%s=alternate-gateway.service\n' "$key" \
+        > "$unit_conflicts/service.d/20-install-alias.conf"
+    if ! systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
+        fail "global Install directive was ignored: $key"
+        unit_gate_override_ok=0
+    fi
+done
+rm -f -- "$unit_conflicts/service.d/20-install-alias.conf"
+if [[ "$unit_gate_override_ok" == 1 ]]; then
+    pass "global Install aliases cannot appear only when the managed unit is enabled"
+fi
+mkdir "$unit_conflicts/path.d" "$unit_conflicts/timer.d"
+printf '[Unit]\nOnFailure=unexpected-recovery.service\n' \
+    > "$unit_conflicts/path.d/20-unit.conf"
+printf '[Install]\nAlso=unexpected-recovery.service\n' \
+    > "$unit_conflicts/timer.d/20-install.conf"
+if systemd_unit_has_dropins 5gpn-intercept-cert.path "$unit_conflicts" \
+   && systemd_unit_has_dropins 5gpn-intercept-cert.timer "$unit_conflicts"; then
+    pass "global Unit and Install directives are rejected for path and timer units"
+else
+    fail "a path/timer global Unit or Install directive bypassed override detection"
+fi
+rm -rf -- "$unit_conflicts/path.d" "$unit_conflicts/timer.d"
 resource_override_ok=1
 for key in \
     OOMPolicy MemoryAccounting TasksAccounting Delegate Slice DisableControllers TasksMax \
@@ -162,6 +261,61 @@ if [[ "$resource_override_ok" == 1 ]]; then
     pass "global inherited resource limits cannot alter the worker isolation unit"
 fi
 rm -rf -- "$unit_conflicts/service.d"
+
+ln -s 5gpn-mihomo.service "$unit_conflicts/alternate-gateway.service"
+mkdir "$unit_conflicts/alternate-gateway.service.d"
+printf '[Service]\nExecStartPre=\n' \
+    > "$unit_conflicts/alternate-gateway.service.d/override.conf"
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *alias* ]]; then
+    pass "systemd aliases cannot attach an unscanned gate-bypass drop-in"
+else
+    fail "an alias unit drop-in bypassed managed-unit override detection"
+fi
+rm -rf -- "$unit_conflicts/alternate-gateway.service.d"
+rm -f -- "$unit_conflicts/alternate-gateway.service"
+
+TEST_EFFECTIVE_NAMES='5gpn-mihomo.service alternate-gateway.service'
+TEST_EFFECTIVE_PRE=exact
+systemctl() {
+    case "$*" in
+        'show -p Names --value 5gpn-mihomo.service') printf '%s\n' "$TEST_EFFECTIVE_NAMES" ;;
+        'show -p DropInPaths --value 5gpn-mihomo.service') printf '\n' ;;
+        *) return 1 ;;
+    esac
+}
+busctl() {
+    case "$*" in
+        *'org.freedesktop.systemd1.Manager GetUnit s 5gpn-mihomo.service')
+            printf '{"type":"o","data":["/org/freedesktop/systemd1/unit/5gpn_2dmihomo_2eservice"]}\n'
+            ;;
+        *' org.freedesktop.systemd1.Service ExecStartPre')
+            if [[ "$TEST_EFFECTIVE_PRE" == exact ]]; then
+                printf '%s\n' '{"type":"a(sasbttttuii)","data":[["/opt/5gpn/scripts/configure-runtime-gate.sh",["/opt/5gpn/scripts/configure-runtime-gate.sh","wait"],false,0,0,0,0,0,0,0],["/opt/5gpn/scripts/configure-runtime-gate.sh",["/opt/5gpn/scripts/configure-runtime-gate.sh","validate-ui"],false,0,0,0,0,0,0,0]]}'
+            else
+                printf '%s\n' '{"type":"a(sasbttttuii)","data":[["/opt/5gpn/scripts/configure-runtime-gate.sh",["/opt/5gpn/scripts/configure-runtime-gate.sh","wait"],false,0,0,0,0,0,0,0]]}'
+            fi
+            ;;
+        *) return 1 ;;
+    esac
+}
+if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+   && [[ "$SYSTEMD_UNIT_CONFLICT_REASON" == *effective*alias* ]]; then
+    pass "PID 1 effective alias names invalidate the managed unit contract"
+else
+    fail "PID 1 effective alias metadata was ignored"
+fi
+TEST_EFFECTIVE_NAMES=5gpn-mihomo.service
+configure_effective_exec_start_pre_is_current \
+    || fail "the exact effective two-step PID1 gate was rejected"
+TEST_EFFECTIVE_PRE=missing-validator
+if configure_effective_exec_start_pre_is_current; then
+    fail "PID 1 effective ExecStartPre accepted a missing gate step"
+else
+    pass "PID 1 effective ExecStartPre must retain both gate steps in order"
+fi
+unset -f systemctl
+unset -f busctl
 
 mkdir "$unit_conflicts/5gpn-intercept-.service.d"
 if systemd_unit_has_dropins 5gpn-intercept-cert.service "$unit_conflicts"; then
@@ -370,28 +524,6 @@ else
     fail "fixed-root marker was written into an untrusted empty directory"
 fi
 
-if (
-    CONF_DIR="$TMP/fixed-conf"
-    # This exact old group is accepted only to claim a legacy configuration root.
-    mkdir -p "$CONF_DIR"
-    printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
-    getent() {
-        [[ "$1" == group && "$2" == gpn-dns ]] && printf 'gpn-dns:x:4242:\n'
-    }
-    file_uid() { printf '0\n'; }
-    file_gid() {
-        [[ "$1" == "$CONF_DIR" ]] && printf '4242\n' || printf '0\n'
-    }
-    file_mode() {
-        [[ "$1" == "$CONF_DIR" ]] && printf '3771\n' || printf '644\n'
-    }
-    fixed_owned_dir_is_safe "$CONF_DIR" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE"
-); then
-    pass "legacy sticky configuration root remains valid for controlled migration"
-else
-    fail "sticky configuration-root design was rejected"
-fi
-
 # That sticky root is also where markers get published, and a file created in a
 # setgid directory inherits its group. The marker must therefore be chowned to
 # root:root before it is renamed into place, or the claim deletes the marker it
@@ -415,7 +547,7 @@ else
 fi
 
 # remove_unit is called with a literal from scopes that have no `unit` variable
-# of their own (remove_owned_renewal_automation), so its own declaration must not
+# of their own (disable_scoped_renewal_timer), so its own declaration must not
 # read one. It returns early for an absent unit file, which keeps this off
 # systemd.
 if (
@@ -427,13 +559,12 @@ else
     fail "remove_unit read a caller-scope variable or touched systemd"
 fi
 
-# `5gpn-journal@.service` is a template. systemd cannot stop or disable a name
-# with no instance, so the stop-and-disable gate refused to delete a unit file
-# that was always safe to delete, and the same empty status answers made a clean
-# rollback report itself incomplete. An instance name must NOT take that path.
-if unit_is_template 5gpn-journal@.service \
+# A template unit cannot be stopped or disabled without an instance, so removal
+# must identify template names before the stop-and-disable path. An instance
+# name must not take that shortcut.
+if unit_is_template example@.service \
    && unit_is_template example@.timer \
-   && ! unit_is_template 5gpn-journal@5gpn-mihomo.service \
+   && ! unit_is_template example@worker.service \
    && ! unit_is_template 5gpn-mihomo.service; then
     pass "a template name is told apart from its instances and from plain units"
 else
@@ -506,7 +637,7 @@ else
 fi
 
 certificate_boundary_modes_ok=1
-for initial_mode in 755 2771; do
+for initial_mode in 755 3771; do
     if ! (
         boundary_mode="$initial_mode"
         CONF_DIR="$TMP/early-cert-conf-$initial_mode"
@@ -543,7 +674,7 @@ if [[ "$certificate_boundary_modes_ok" == 1 \
    && -n "$prep_boundary_line" && -n "$install_files_line" && -n "$intercept_cert_line" \
    && "$prep_boundary_line" -lt "$install_files_line" \
    && "$prep_boundary_line" -lt "$intercept_cert_line" ]]; then
-    pass "fresh 0755 and legacy 2771 config roots seal as root:root 0755 before certificate helpers"
+    pass "fresh 0755 and current 3771 config roots seal as root:root 0755 before certificate helpers"
 else
     fail "certificate publication can run before the sticky config boundary"
 fi
@@ -602,27 +733,26 @@ if mkfifo "$tls_tree/special"; then
 fi
 
 if (
-    DNS_CERT_DIR="$TMP/cert-roles"
+    cert_fixture="$(mktemp -d /tmp/5gpn-installer-cert-role.XXXXXX)"
+    trap 'rm -rf -- "$cert_fixture"' EXIT
+    CONF_DIR="$cert_fixture/config"
+    DNS_CERT_DIR="$CONF_DIR/cert"
     role="$DNS_CERT_DIR/dot"
     generation="$role/generations/generation-20260721T010203Z-10-20"
     mkdir -p "$generation"
+    chmod 0755 "$CONF_DIR"
+    chmod 0751 "$DNS_CERT_DIR"
+    printf '%s\n' "$CONF_OWNERSHIP_VALUE" > "$CONF_DIR/$CONF_OWNERSHIP_MARKER"
+    printf '%s\n' "$CERT_ROOT_MARKER_VALUE" > "$DNS_CERT_DIR/$CERT_ROOT_MARKER"
     printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:dot" > "$role/$CERT_ROLE_MARKER"
     printf 'cert\n' > "$generation/fullchain.pem"
     printf 'key\n' > "$generation/privkey.pem"
+    chmod 0750 "$role" "$role/generations" "$generation"
+    chmod 0644 "$CONF_DIR/$CONF_OWNERSHIP_MARKER" "$DNS_CERT_DIR/$CERT_ROOT_MARKER" \
+        "$role/$CERT_ROLE_MARKER"
+    chmod 0640 "$generation/fullchain.pem" "$generation/privkey.pem"
     ln -s "generations/$(basename -- "$generation")" "$role/current"
-    account_gid() { printf '4242\n'; }
-    file_uid() { printf '0\n'; }
-    file_gid() {
-        case "$1" in "$role/$CERT_ROLE_MARKER"|"$role/current") printf '0\n' ;; *) printf '4242\n' ;; esac
-    }
-    file_mode() {
-        case "$1" in
-            "$role"|"$role/generations"|"$generation") printf '750\n' ;;
-            "$role/$CERT_ROLE_MARKER") printf '644\n' ;;
-            *) printf '640\n' ;;
-        esac
-    }
-    file_nlink() { printf '1\n'; }
+    account_gid() { id -g; }
     cert_role_tree_is_safe_for_recursive_metadata "$role" || exit 1
     rm -f -- "$role/current"
     ln -s ../../outside "$role/current"
@@ -663,128 +793,25 @@ else
     fail "debug root marker was written into an untrusted directory"
 fi
 
-# Static publication must override restrictive source modes before the atomic
-# swap. The console, zashboard, and iOS profile are all served by the
-# unprivileged fivegpn runtime, while their source trees can originate from
-# mktemp or a caller running with umask 077.
-static_root="$TMP/static-publication"
-if (
-    umask 077
-    src="$static_root/source"
-    dest="$static_root/live"
-    file_uid() { printf '0\n'; }
-    file_gid() { printf '0\n'; }
-    file_mode() {
-        case "$1" in
-            "$src"|"$src"/*|"$dest"|"$dest"/*|"$static_root"/.live.new.*)
-                if [[ "$POSIX_MODES" == 0 ]]; then
-                    [[ -d "$1" ]] && printf '755\n' || printf '644\n'
-                else
-                    stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true
-                fi ;;
-            *) printf '755\n' ;;
-        esac
-    }
-    normalize_static_tree_ownership() { :; }
-    mkdir -p "$src/assets"
-    printf 'index\n' > "$src/index.html"
-    printf 'asset\n' > "$src/assets/app.js"
-    chmod 0700 "$src" "$src/assets"
-    chmod 0600 "$src/index.html" "$src/assets/app.js"
-    publish_owned_tree "$src" "$dest" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE"
-    [[ "$(file_mode "$dest")" == 755 ]]
-    [[ "$(file_mode "$dest/assets")" == 755 ]]
-    [[ "$(file_mode "$dest/index.html")" == 644 ]]
-    [[ "$(file_mode "$dest/assets/app.js")" == 644 ]]
-    [[ "$(file_mode "$dest/$ZASH_OWNERSHIP_MARKER")" == 644 ]]
-    grep -qxF index "$dest/index.html"
-    grep -qxF asset "$dest/assets/app.js"
-); then
-    pass "static publication normalizes restrictive source modes for fivegpn"
+# The retired whole-tree replacement helper must not survive beside the
+# generation publisher. Detailed filesystem behavior is exercised by
+# test_ui_generation.sh against the source-only helper itself.
+if declare -F publish_owned_tree >/dev/null 2>&1; then
+    fail "retired move-live-then-replace UI publisher remains"
 else
-    fail "static publication retained modes that block the fivegpn runtime"
-fi
-
-if (
-    custom_parent="$TMP/custom-static-writable"
-    mkdir -p "$custom_parent"
-    file_uid() { printf '0\n'; }
-    file_mode() {
-        [[ "$1" == "$custom_parent" ]] && printf '777\n' || printf '755\n'
-    }
-    ! static_publish_parent_is_safe "$custom_parent/web"
-); then
-    pass "custom static publication rejects a group/world-writable parent"
-else
-    fail "custom static publication accepted a writable parent"
-fi
-
-if (
-    custom_parent="$TMP/custom-static-marker"
-    UI_DIR="$custom_parent/web"
-    mkdir -p "$UI_DIR"
-    printf '%s\n' "$ZASH_OWNERSHIP_VALUE" > "$UI_DIR/$ZASH_OWNERSHIP_MARKER"
-    file_uid() {
-        [[ "$1" == "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
-            && printf '1001\n' || printf '0\n'
-    }
-    file_gid() { printf '0\n'; }
-    file_mode() {
-        [[ "$1" == "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]] \
-            && printf '644\n' || printf '755\n'
-    }
-    ! claim_web_dir >/dev/null 2>&1
-); then
-    pass "custom static ownership markers must be root-published"
-else
-    fail "custom static tree accepted a non-root ownership marker"
-fi
-
-if (
-    custom_parent="$TMP/custom-static-empty-owner"
-    UI_DIR="$custom_parent/web"
-    mkdir -p "$UI_DIR"
-    file_uid() {
-        [[ "$1" == "$UI_DIR" ]] && printf '1001\n' || printf '0\n'
-    }
-    file_gid() { printf '0\n'; }
-    file_mode() { printf '755\n'; }
-    ! claim_web_dir >/dev/null 2>&1 \
-        && [[ ! -e "$UI_DIR/$ZASH_OWNERSHIP_MARKER" ]]
-); then
-    pass "empty custom asset roots are trusted before marker publication"
-else
-    fail "public-tree marker was written into an untrusted empty directory"
-fi
-
-if (
-    race_root="$TMP/custom-static-race"
-    src="$race_root/source"
-    dest="$race_root/live"
-    mkdir -p "$src" "$dest"
-    printf 'new\n' > "$src/index.html"
-    printf 'old\n' > "$dest/index.html"
-    ensure_static_publish_parent() { :; }
-    static_publish_parent_is_safe() { return 1; }
-    file_uid() { printf '0\n'; }
-    file_gid() { printf '0\n'; }
-    file_mode() { [[ -d "$1" ]] && printf '755\n' || printf '644\n'; }
-    normalize_static_tree_ownership() { :; }
-    ! publish_owned_tree "$src" "$dest" "$ZASH_OWNERSHIP_MARKER" "$ZASH_OWNERSHIP_VALUE" >/dev/null 2>&1 \
-        && grep -qxF old "$dest/index.html"
-); then
-    pass "static publication revalidates its trusted parent before the swap"
-else
-    fail "static publication swapped after its parent boundary changed"
+    pass "UI publication is delegated exclusively to the generation helper"
 fi
 
 # Uninstall keeps Gum while deleting the rest of an owned runtime, and falls
 # back to plain output before deleting a runtime where Gum is already absent.
 if (
     BASE_DIR="$TMP/runtime-with-gum"
+    UI_DIR="$BASE_DIR/ui"
+    UI_CURRENT_DIR="$UI_DIR/current"
     BIN_DIR="$BASE_DIR/bin"
     GUM_BIN="$BIN_DIR/gum"
     _HAVE_GUM=0
+    [[ "$UI_DIR" == "$BASE_DIR/ui" && "$UI_CURRENT_DIR" == "$UI_DIR/current" ]] || exit 1
     mkdir -p "$BIN_DIR" "$BASE_DIR/scripts"
     printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
     file_uid() { printf '0\n'; }
@@ -794,10 +821,14 @@ if (
     }
     printf '#!/bin/sh\nexit 0\n' > "$GUM_BIN"
     chmod 0755 "$GUM_BIN"
-    printf 'runtime\n' > "$BIN_DIR/5gpn-dns"
+    printf 'runtime\n' > "$BIN_DIR/obsolete-helper"
     printf 'runtime\n' > "$BASE_DIR/scripts/helper"
-    remove_runtime_preserving_gum >/dev/null
-    [[ -x "$GUM_BIN" && ! -e "$BIN_DIR/5gpn-dns" && ! -e "$BASE_DIR/scripts" ]]
+    remove_runtime_preserving_gum >/dev/null || exit 1
+    [[ -x "$GUM_BIN" \
+       && -f "$BASE_DIR/$BASE_OWNERSHIP_MARKER" \
+       && ! -e "$BIN_DIR/obsolete-helper" \
+       && ! -e "$BASE_DIR/scripts" \
+       && ! -e "$UI_DIR" ]]
 ); then
     pass "uninstall preserves Gum and removes the remaining runtime"
 else
@@ -805,9 +836,12 @@ else
 fi
 if (
     BASE_DIR="$TMP/runtime-without-gum"
+    UI_DIR="$BASE_DIR/ui"
+    UI_CURRENT_DIR="$UI_DIR/current"
     BIN_DIR="$BASE_DIR/bin"
     GUM_BIN="$BIN_DIR/gum"
     _HAVE_GUM=1
+    [[ "$UI_DIR" == "$BASE_DIR/ui" && "$UI_CURRENT_DIR" == "$UI_DIR/current" ]] || exit 1
     mkdir -p "$BIN_DIR"
     printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
     file_uid() { printf '0\n'; }
@@ -815,12 +849,40 @@ if (
     file_mode() {
         [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '644\n' || printf '755\n'
     }
-    remove_runtime_preserving_gum >/dev/null
+    remove_runtime_preserving_gum >/dev/null || exit 1
     [[ ! -e "$BASE_DIR" && "$_HAVE_GUM" == 0 ]]
 ); then
     pass "uninstall disables Gum output before removing an absent-Gum runtime"
 else
     fail "uninstall retained a stale Gum output state"
+fi
+
+if (
+    BASE_DIR="$TMP/runtime-with-unsafe-ui"
+    UI_DIR="$BASE_DIR/ui"
+    UI_CURRENT_DIR="$UI_DIR/current"
+    BIN_DIR="$BASE_DIR/bin"
+    GUM_BIN="$BIN_DIR/gum"
+    mkdir -p "$BIN_DIR" "$UI_DIR"
+    printf '%s\n' "$BASE_OWNERSHIP_VALUE" > "$BASE_DIR/$BASE_OWNERSHIP_MARKER"
+    printf '#!/bin/sh\nexit 0\n' > "$GUM_BIN"
+    chmod 0755 "$GUM_BIN"
+    printf 'runtime\n' > "$BASE_DIR/runtime-sentinel"
+    printf 'ui\n' > "$UI_DIR/ui-sentinel"
+    file_uid() { printf '0\n'; }
+    file_gid() { printf '0\n'; }
+    file_mode() {
+        [[ "$1" == "$BASE_DIR/$BASE_OWNERSHIP_MARKER" ]] && printf '644\n' || printf '755\n'
+    }
+    remove_ui_dir() { return 1; }
+    ! remove_runtime_preserving_gum >/dev/null 2>&1 \
+        && [[ -x "$GUM_BIN" \
+           && -f "$BASE_DIR/runtime-sentinel" \
+           && -f "$UI_DIR/ui-sentinel" ]]
+); then
+    pass "an unsafe UI tree blocks runtime removal before Gum or runtime mutation"
+else
+    fail "runtime removal changed files after the UI safety gate failed"
 fi
 
 # Fake a host with one assigned non-loopback IPv4 and a matching default route.
@@ -870,21 +932,19 @@ listeners="$(render_mihomo_listeners '10.20.30.40,10.20.30.41' 'console.example.
    && "$(grep -Fc 'port: 80,' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'port: 8080,' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'port: 8443,' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'port: 5060,' <<<"$listeners")" == 2 ]] \
-    && pass "two bind IPs render independent :80/:443/:5060/:8080/:8443 listener sets" \
-    || fail "dynamic listener renderer did not emit five listeners per bind IP"
+   && "$listeners" != *'5060'* ]] \
+    && pass "two bind IPs render independent :80/:443/:8080/:8443 listener sets" \
+    || fail "dynamic listener renderer did not emit four listeners per bind IP"
 [[ "$listeners" == *'name: gateway,'* && "$listeners" == *'name: gateway-2,'* \
    && "$listeners" == *'name: gateway80,'* && "$listeners" == *'name: gateway80-2,'* \
    && "$listeners" == *'name: gateway8080,'* && "$listeners" == *'name: gateway8080-2,'* \
-   && "$listeners" == *'name: gateway8443,'* && "$listeners" == *'name: gateway8443-2,'* \
-   && "$listeners" == *'name: gateway5060,'* && "$listeners" == *'name: gateway5060-2,'* ]] \
+   && "$listeners" == *'name: gateway8443,'* && "$listeners" == *'name: gateway8443-2,'* ]] \
     && pass "listener names use the current gateway vocabulary" \
     || fail "dynamic listener names do not cover all seeded gateway ports"
 [[ "$(grep -Fc 'target: console.example.com:443}' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'target: console.example.com:80}' <<<"$listeners")" == 2 \
    && "$(grep -Fc 'target: console.example.com:8080}' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'target: console.example.com:8443}' <<<"$listeners")" == 2 \
-   && "$(grep -Fc 'target: console.example.com:5060}' <<<"$listeners")" == 2 ]] \
+   && "$(grep -Fc 'target: console.example.com:8443}' <<<"$listeners")" == 2 ]] \
     && pass "all listener sets use same-port console hostname fallback targets" \
     || fail "dynamic listeners did not use the console hostname target"
 
@@ -929,11 +989,17 @@ MIHOMO_DIR="$CONF_DIR/mihomo"
 FIVEGPN_SERVICE_USER="$(id -un)"
 FIVEGPN_SERVICE_GROUP="$(id -gn)"
 MIHOMO_BIN="$TMP/fake-mihomo"
+ARTIFACT_STAGE=""
 INTERCEPT_DIR="$CONF_DIR/intercept"
 MIHOMO_TEST_LOG="$TMP/mihomo.log"; export MIHOMO_TEST_LOG
 cat > "$MIHOMO_BIN" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MIHOMO_TEST_LOG"
+if [[ "${1:-}" == 5gpn-config && "${2:-}" == inspect-controller && "${3:-}" == --config ]]; then
+    revision="$(sha256sum "$4" | awk '{print $1}')"
+    jq -nc --arg revision "$revision" \
+        '{version:2,raw_revision:$revision,secret:"test-controller-secret",external_controller_tls:"127.0.0.1:443",external_ui:"/opt/5gpn/ui/current",certificate:"/etc/5gpn/cert/console/current/fullchain.pem",private_key:"/etc/5gpn/cert/console/current/privkey.pem"}'
+fi
 exit 0
 EOF
 chmod +x "$MIHOMO_BIN"
@@ -960,7 +1026,6 @@ file_mode() {
         *) stat -c %a -- "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || true ;;
     esac
 }
-persist_mihomo_secret() { :; }
 chown() { :; }
 BASE_DOMAIN=example.com
 MIHOMO_LISTEN_IPS=10.20.30.40
@@ -980,10 +1045,10 @@ config_mode="$(stat -c %a "$config" 2>/dev/null || stat -f %Lp "$config")"
 # longer a listener to name.
 grep -Fq 'console.example.com: 127.0.0.1' "$config" \
     && grep -Fq 'AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,console.example.com)),DIRECT' "$config" \
-    && grep -Fq 'name: gateway5060' "$config" \
-    && grep -Fq 'QUIC: { ports: [443, 5060] }' "$config" \
+    && grep -Fq 'QUIC: { ports: [443] }' "$config" \
+    && ! grep -Fq '5060' "$config" \
     && pass "seed contains public console mapping" \
-    || fail "seed lacks public console mapping or default :5060 ingress"
+    || fail "seed lacks the public console mapping or retains :5060"
 printf '%s\n' '# operator edit must survive' >> "$config"
 before="$(sha256sum "$config" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$config" | awk '{print $1}')"
 render_mihomo_config >/dev/null
@@ -1041,9 +1106,7 @@ unset -f chown
 
 # dns.env accepts exactly the current key set and rejects ambiguous state.
 saved_dns_env="$(cat "$CONF_DIR/dns.env" 2>/dev/null || true)"
-printf '%s\n' \
-    'DNS_BASE_DOMAIN=example.com' \
-    'DNS_PUBLIC_IP=198.51.100.9' > "$CONF_DIR/dns.env"
+cp "$ROOT/etc/5gpn/dns.env.example" "$CONF_DIR/dns.env"
 validate_dns_env_schema >/dev/null 2>&1 \
     && pass "current dns.env keys pass strict schema validation" \
     || fail "current dns.env keys were rejected"
@@ -1099,72 +1162,23 @@ else
     pass "command arity is enforced before dispatch"
 fi
 
-# The orphaned allowlist file is removed, and only when no rule reads it.
-#
-# whitelist.txt survived on every host that had one: holding the operator's
-# CIDRs, swept to 0660 by the mode pass, and read by nothing. An operator who
-# finds it reasonably concludes the panel is still source-restricted.
-#
-# Both call sites matter and one was nearly missed: render_mihomo_config returns
-# early on the preserve path, which is THE path an upgrade takes, and that is
-# exactly where the orphan lives.
-retire_fn="$(sed -n '/^retire_mihomo_whitelist()/,/^}/p' "$INSTALL")"
-if [[ -z "$retire_fn" ]]; then
-    fail "retire_mihomo_whitelist is missing"
+# The allowlist management surface and its retired-file teardown are both gone.
+# The read-only legacy detector is the only code allowed to name the path.
+allowlist_preflight_free="$TMP/allowlist-preflight-free"
+awk '
+    /^detect_legacy_footprints\(\)/ { skip = 1 }
+    skip && /^kernel_release_supports_extension_workers\(\)/ { skip = 0 }
+    skip { print ""; next }
+    { print }
+' "$INSTALL" > "$allowlist_preflight_free"
+if grep -Eq '^(add_allow_ip|del_allow_ip|apply_whitelist|retire_mihomo_whitelist)\(\)' "$allowlist_preflight_free"; then
+    fail "an allowlist mutation or teardown operation remains"
+elif grep -Fq '/whitelist.txt' "$allowlist_preflight_free"; then
+    fail "the installer still builds a path to an allowlist file"
 else
-    printf '%s' "$retire_fn" | grep -Fq 'RULE-SET' \
-        || fail "retire_mihomo_whitelist deletes the file without checking the live config"
-    render_fn="$(sed -n '/^render_mihomo_config()/,/^}/p' "$INSTALL")"
-    [[ "$(printf '%s' "$render_fn" | grep -c 'retire_mihomo_whitelist')" == 2 ]] \
-        || fail "render_mihomo_config does not retire the allowlist on both the preserve and the seed path"
+    pass "the installer neither manages nor tears down an allowlist file"
 fi
-
-retire_dir="$TMP/retire/mihomo"
-mkdir -p "$retire_dir"
-printf '203.0.113.1/32\n' > "$retire_dir/whitelist.txt"
-printf 'rules:\n  - AND,((NOT,((IN-TYPE,INNER))),(DOMAIN,c.test)),DIRECT\n' > "$retire_dir/config.yaml"
-(
-    MIHOMO_DIR="$retire_dir"
-    retire_mihomo_whitelist "$retire_dir/config.yaml"
-) >/dev/null 2>&1
-if [[ -e "$retire_dir/whitelist.txt" ]]; then
-    fail "the orphaned allowlist file survived a config that does not read it"
-else
-    pass "the orphaned allowlist file is removed once no rule reads it"
-fi
-
-# And it is kept when a rule still does, because deleting a file a live rule
-# reads takes the gateway down at the next reload.
-printf '203.0.113.1/32\n' > "$retire_dir/whitelist.txt"
-printf 'rules:\n  - AND,((DOMAIN,c.test),(RULE-SET,whitelist,DIRECT,src)),DIRECT\n' > "$retire_dir/config.yaml"
-(
-    MIHOMO_DIR="$retire_dir"
-    retire_mihomo_whitelist "$retire_dir/config.yaml"
-) >/dev/null 2>&1
-if [[ -e "$retire_dir/whitelist.txt" ]]; then
-    pass "an allowlist file a live rule still reads is kept"
-else
-    fail "the allowlist file was deleted while a rule still reads it"
-fi
-
-# The allowlist ops are gone by owner decision, so the boundaries they used to
-# enforce -- canonical CIDR validation, exact-match deletion, symlink refusal
-# -- have nothing left to protect. What replaces them is the assertion that
-# nothing writes an allowlist file at all: a writer that survives its rule
-# would edit a file no rule reads, and report success doing it.
-if grep -Eq '^(add_allow_ip|del_allow_ip|apply_whitelist)\(\)' "$INSTALL"; then
-    fail "an allowlist mutation op survived the allowlist"
-elif [[ -n "$(awk '
-    /^retire_mihomo_whitelist\(\)/ { skip = 1 }
-    skip { if ($0 == "}") skip = 0; next }
-    /[/]whitelist[.]txt/ { print }
-' "$INSTALL")" ]]; then
-    # retire_mihomo_whitelist is exempt by range: it names the path in order to
-    # delete it, which is the one legitimate reason left to name it at all.
-    fail "the installer still builds a path to an allowlist file outside the retirement"
-else
-    pass "no allowlist file is written or refreshed by the installer"
-fi
+rm -f -- "$allowlist_preflight_free"
 # Reset must stop at the first failed boundary even when main dispatch invokes
 # it through an && list (which suppresses Bash errexit inside called functions).
 reset_ran="$TMP/reset-ran"
@@ -1203,13 +1217,15 @@ fi
 # validator disagreed the failure was silent in the worst way: the service
 # started, bound every tunnel and the TLS controller, reported itself healthy,
 # and had no DNS ingress at all because it could not open its own key.
-[[ "$(cert_role_group dot)" == "$FIVEGPN_SERVICE_GROUP" ]] \
+load_cert_role_helpers || fail "shared certificate role helper could not be loaded"
+[[ "$(cert_role_ctl_group_name dot)" == "$FIVEGPN_SERVICE_GROUP" ]] \
     || fail "the DoT certificate role is not owned by the account that serves DoT"
-[[ "$(cert_role_group console)" == "$FIVEGPN_SERVICE_GROUP" ]] \
+[[ "$(cert_role_ctl_group_name console)" == "$FIVEGPN_SERVICE_GROUP" ]] \
     || fail "the controller certificate role is not owned by the serving account"
-[[ "$(cert_role_group web)" == root ]] \
-    || fail "the reader-less web role was widened beyond root"
-if cert_role_group nonsense >/dev/null 2>&1; then
+if cert_role_ctl_group_name web >/dev/null 2>&1; then
+    fail "the retired web certificate role was assigned an owning account"
+fi
+if cert_role_ctl_group_name nonsense >/dev/null 2>&1; then
     fail "an unknown certificate role was given an owning account"
 fi
 pass "certificate roles are owned by the account that serves them"
@@ -1221,6 +1237,9 @@ BASE_DIR="$TMP/base"
 if (
     safe_ui_path() { printf '%s\n' "$UI_DIR"; }
     UI_DIR="$TMP/external/ui"
+    # shellcheck source=../scripts/ui-generation.sh
+    source "$ROOT/scripts/ui-generation.sh"
+    UI_GENERATION_HELPER_LOADED=1
     file_uid() { printf '0\n'; }
     file_gid() { printf '0\n'; }
     file_mode() {
@@ -1232,7 +1251,9 @@ if (
     ! claim_ui_dir >/dev/null 2>&1
     rm -f "$UI_DIR/file"
     claim_ui_dir >/dev/null
-    echo owned > "$UI_DIR/file"
+    echo unsafe > "$UI_DIR/file"
+    ! remove_ui_dir >/dev/null 2>&1
+    rm -f "$UI_DIR/file"
     remove_ui_dir >/dev/null
     [[ ! -e "$UI_DIR" ]]
 ); then
@@ -1251,6 +1272,29 @@ if safe_ui_path >/dev/null 2>&1; then
     fail "system-directory descendant accepted as UI_DIR"
 else
     pass "system-directory descendants are rejected as panel cleanup paths"
+fi
+
+restart_log="$TMP/restart-systemctl.log"
+if (
+    check_root() { :; }
+    load_ui_generation_helper() { return 1; }
+    systemctl() { printf '%s\n' "$*" >> "$restart_log"; }
+    ! restart_services >/dev/null 2>&1
+) && [[ ! -s "$restart_log" ]]; then
+    pass "manual restart rejects an unsafe UI helper before systemd mutation"
+else
+    fail "manual restart touched systemd before the UI helper/current gate"
+fi
+if (
+    check_root() { :; }
+    load_ui_generation_helper() { :; }
+    _ui_generation_current_only_is_safe() { return 1; }
+    systemctl() { printf '%s\n' "$*" >> "$restart_log"; }
+    ! restart_services >/dev/null 2>&1
+) && [[ ! -s "$restart_log" ]]; then
+    pass "manual restart rejects invalid current before systemd mutation"
+else
+    fail "manual restart stopped/restarted before current validation"
 fi
 
 # Service activation errors must propagate instead of falling through to the
@@ -1475,8 +1519,11 @@ HTTP_INSTALL_LOG="$TMP/http-install-order.log"
     deploy_cert_roles() { printf 'deploy_cert_roles console/current\n' >> "$HTTP_INSTALL_LOG"; }
     systemctl() {
         printf 'systemctl %s\n' "$*" >> "$HTTP_INSTALL_LOG"
-        case "$*" in
-            'cat certbot.timer'|'is-active --quiet certbot.service') return 1 ;;
+        case "${1:-}:${2:-}:${3:-}:${4:-}:${5:-}" in
+            show:-p:LoadState:--value:certbot.timer|show:-p:LoadState:--value:certbot.service)
+                printf '%s\n' not-found
+                return 0
+                ;;
         esac
         return 0
     }
@@ -1591,10 +1638,10 @@ grep -Eq '^wait_service_ready\(\)' "$INSTALL" \
     || fail "service readiness gate is absent"
 
 echo "----"
-# Certificate material has no migration path and nothing to roll back to, so a
+# Certificate material has no compatibility path and nothing to roll back to, so a
 # host this release cannot accept must be turned away while its deployment is
 # still intact. ensure_dns_cert_root only runs at publication time, by which
-# point the three binaries are already replaced -- hence the same read-only
+# point runtime artifacts may already be replaced -- hence the same read-only
 # verdict runs in preflight, from one shared implementation.
 cert_pf="$TMP/cert-preflight"
 if (

@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$ROOT/scripts/renew-hook.sh"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d /tmp/5gpn-renew-hook.XXXXXX)"
 trap 'rm -rf -- "$TMP"' EXIT
 
 fail() { echo "FAIL: $*"; exit 1; }
@@ -17,13 +17,17 @@ source "$HOOK"
 PATH="$TEST_PATH"
 # The production mapping is held statically; temporary fixtures use the current
 # developer group so an unprivileged test runner can exercise atomic metadata.
-grep -Fq 'dot|console) group="$FIVEGPN_CERT_GROUP"' "$HOOK" \
-    || fail "current certificate roles do not map to fivegpn"
+grep -Fq 'dot|console) printf' "$ROOT/scripts/cert-role-ctl.sh" \
+    && grep -Fq 'CERT_ROLE_CTL_SERVICE_GROUP=fivegpn' "$ROOT/scripts/cert-role-ctl.sh" \
+    || fail "shared certificate roles do not map dot/console to fivegpn"
 grep -Fxq 'UI_DIR=/opt/5gpn/ui' "$HOOK" \
-    || fail "renew hook profile destination is not the live UI directory"
+    || fail "renew hook stable generation root is not /opt/5gpn/ui"
+grep -Fq 'UI_OWNERSHIP_VALUE=5gpn-ui-generations' "$HOOK" \
+    && grep -Fq 'UI_GENERATION_MARKER_VALUE="5gpn-ui-generations"' \
+        "$ROOT/scripts/ui-generation.sh" \
+    || fail "renew hook and UI helper disagree on the generation-root marker"
 grep -Eq '^WWW_DIR=/opt/5gpn/www$' "$HOOK" \
     && fail "renew hook still defines the retired profile directory"
-role_group() { id -gn; }
 # Behaviour fixtures emulate the scoped helper, which already owns the shared
 # certificate lock before invoking the hook.
 FIVEGPN_CERT_LOCK_HELD=1
@@ -35,36 +39,76 @@ grep -Fq 'certificate chain is not trusted for production TLS' "$HOOK" \
     || fail "renew hook does not enforce a trusted production chain"
 grep -Fq 'acquire_deploy_lock || return 1' "$HOOK" \
     || fail "external Certbot deploy hook publication is not certificate-lock serialized"
+deploy_lock_fn="$(sed -n '/^acquire_deploy_lock()/,/^}/p' "$HOOK")"
+install_lock_line="$(grep -n 'exec 8>"$INSTALL_LOCK_FILE"' <<<"$deploy_lock_fn" | cut -d: -f1)"
+gate_line="$(grep -n 'assert_no_retained_configure_gate' <<<"$deploy_lock_fn" | cut -d: -f1)"
+renew_lock_line="$(grep -n 'exec 9>"$RENEW_LOCK_FILE"' <<<"$deploy_lock_fn" | cut -d: -f1)"
+[[ -n "$install_lock_line" && -n "$gate_line" && -n "$renew_lock_line" \
+   && "$install_lock_line" -lt "$gate_line" \
+   && "$gate_line" -lt "$renew_lock_line" ]] \
+    || fail "external deploy hook does not reject retained gate state between install and certificate locks"
+pass "external deploy hook serializes and rejects retained gate state before publication"
 acquire_deploy_lock() { return 0; }
 
 CERT_ROOT="$TMP/cert"
 DNS_ENV="$TMP/dns.env"
 LE_LIVE_ROOT="$TMP/live"
+LE_ARCHIVE_ROOT="$TMP/archive"
 IOSGEN="$TMP/gen-ios-profile.sh"
 UI_DIR="$TMP/ui"
+load_ui_generation_helper || fail "could not load UI generation helper fixture"
 # A sentinel keeps a partially updated hook inside the fixture and lets the
 # invocation assertion prove that this retired destination was not selected.
 WWW_DIR="$TMP/retired-www"
 PROFILE_LOG="$TMP/profile.log"
 SYSTEMCTL_LOG="$TMP/systemctl.log"
-mkdir -p "$LE_LIVE_ROOT" "$UI_DIR"
-printf '%s\n' "$UI_OWNERSHIP_VALUE" > "$UI_DIR/$UI_OWNERSHIP_MARKER"
-chmod 0755 "$UI_DIR"
-chmod 0644 "$UI_DIR/$UI_OWNERSHIP_MARKER"
+mkdir -p "$LE_LIVE_ROOT" "$LE_ARCHIVE_ROOT"
+chmod 0755 "$TMP"
+ui_generation_claim_root "$UI_DIR" || fail "could not claim UI generation fixture"
+UI_DIST="$TMP/ui-dist"
+mkdir -p "$UI_DIST/assets"
+printf '<html>renew fixture</html>\n' > "$UI_DIST/index.html"
+printf 'asset\n' > "$UI_DIST/assets/app-12345678.js"
+UI_INITIAL="$(ui_generation_stage_tree "$UI_DIR" "$UI_DIST" v1.0.0)" \
+    || fail "could not stage initial UI generation fixture"
+printf 'old dot\n' > "$UI_INITIAL/ios-dot.mobileconfig"
+printf 'old intercept\n' > "$UI_INITIAL/ios-intercept-ca.mobileconfig"
+dot_sha="$(sha256sum "$UI_INITIAL/ios-dot.mobileconfig" | awk '{print $1}')"
+intercept_sha="$(sha256sum "$UI_INITIAL/ios-intercept-ca.mobileconfig" | awk '{print $1}')"
+cat > "$UI_INITIAL/.5gpn-profile-inputs" <<EOF
+version=1
+dot_signer_leaf_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+dot_public_key_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+intercept_ca_der_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+domain=dot.example.test
+gateway_ipv4=192.0.2.10
+ios_dot_sha256=${dot_sha}
+ios_intercept_ca_sha256=${intercept_sha}
+EOF
+ui_generation_publish "$UI_DIR" "$UI_INITIAL" \
+    || fail "could not publish initial UI generation fixture"
 cat > "$IOSGEN" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$PROFILE_LOG"
-mkdir -p -- "$3"
 for name in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
-    candidate="$(mktemp "$3/.profile.XXXXXX")"
-    printf 'renewed %s\n' "$name" > "$candidate"
-    mv -f -- "$candidate" "$3/$name"
+    printf 'renewed %s\n' "$name" > "$3/$name"
 done
+dot_sha="$(sha256sum "$3/ios-dot.mobileconfig" | awk '{print $1}')"
+intercept_sha="$(sha256sum "$3/ios-intercept-ca.mobileconfig" | awk '{print $1}')"
+cat > "$3/.5gpn-profile-inputs" <<MANIFEST
+version=1
+dot_signer_leaf_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+dot_public_key_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+intercept_ca_der_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+domain=dot.example.test
+gateway_ipv4=192.0.2.10
+ios_dot_sha256=${dot_sha}
+ios_intercept_ca_sha256=${intercept_sha}
+MANIFEST
 EOF
 chmod +x "$IOSGEN"
 export PROFILE_LOG
-chmod 0755 "$TMP"
 printf '%s\n' "$CONFIG_ROOT_MARKER_VALUE" > "$TMP/$CONFIG_ROOT_MARKER"
 chmod 0644 "$TMP/$CONFIG_ROOT_MARKER"
 mkdir -p "$CERT_ROOT"
@@ -102,11 +146,16 @@ write_env() {
 
 generate_cert() {
     local dir="$1" sans="$2"
-    mkdir -p "$dir"
+    local name archive
+    name="$(basename -- "$dir")"
+    archive="$LE_ARCHIVE_ROOT/$name"
+    mkdir -p "$dir" "$archive"
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
-        -keyout "$dir/privkey.pem" -out "$dir/fullchain.pem" \
+        -keyout "$archive/privkey1.pem" -out "$archive/fullchain1.pem" \
         -subj '/CN=example.test' -addext "subjectAltName=${sans}" \
         >/dev/null 2>&1
+    ln -sfn "../../archive/$name/fullchain1.pem" "$dir/fullchain.pem"
+    ln -sfn "../../archive/$name/privkey1.pem" "$dir/privkey.pem"
 }
 
 mode_of() {
@@ -136,7 +185,10 @@ generate_cert "$LE_LIVE_ROOT/other.test" 'DNS:other.test,DNS:*.other.test'
 # lineage must be a successful no-op: no role files and no daemon reload.
 : > "$SYSTEMCTL_LOG"
 RENEWED_LINEAGE="$LE_LIVE_ROOT/other.test"
+original_load_ui_helper="$(declare -f load_ui_generation_helper)"
+load_ui_generation_helper() { return 99; }
 renew_hook_main >/dev/null
+eval "$original_load_ui_helper"
 roles_unpublished || fail "unrelated lineage created role files"
 [[ ! -s "$SYSTEMCTL_LOG" ]] || fail "unrelated lineage touched systemd: $(cat "$SYSTEMCTL_LOG")"
 pass "unrelated lineage is ignored without reload"
@@ -193,16 +245,18 @@ for role in dot console; do
         console.example.test dot.example.test >/dev/null \
         || fail "$role certificate pair failed post-publication validation"
 done
-[[ "$(cat "$PROFILE_LOG")" == $'dot.example.test\t192.0.2.10\t'"$UI_DIR" ]] \
-    || fail "renew hook did not re-sign profiles directly into the live UI directory"
+profile_candidate="$(cut -f3 "$PROFILE_LOG")"
+[[ "$(cut -f1-2 "$PROFILE_LOG")" == $'dot.example.test\t192.0.2.10' \
+   && "$profile_candidate" == "$UI_DIR/generations/.candidate-generation-"* ]] \
+    || fail "renew hook did not re-sign profiles inside a cloned unpublished generation"
 for profile in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
-    [[ -s "$UI_DIR/$profile" ]] || fail "renew hook did not publish $profile into UI_DIR"
+    [[ -s "$UI_DIR/current/$profile" ]] || fail "renew hook did not publish $profile through current"
 done
 [[ ! -e "$WWW_DIR/ios-dot.mobileconfig" \
    && ! -e "$WWW_DIR/ios-intercept-ca.mobileconfig" ]] \
     || fail "renew hook published a profile into the retired directory"
-if find "$UI_DIR" -mindepth 1 -name '.profile.*' -print | grep -q .; then
-    fail "renew hook left a profile publication candidate in UI_DIR"
+if find "$UI_DIR" -mindepth 1 -name '.candidate-generation-*' -print | grep -q .; then
+    fail "renew hook left an unpublished UI generation candidate"
 fi
 [[ ! -s "$SYSTEMCTL_LOG" ]] \
     || fail "valid certificate publication incorrectly used SIGHUP/systemctl"
@@ -210,28 +264,100 @@ if find "$CERT_ROOT" \( -name '.new.*' -o -name '.current.*' \) \
     | grep -q .; then
     fail "staging files were left behind after successful publication"
 fi
-pass "valid Cloudflare pair and renewed profiles publish into their live paths"
+pass "valid Cloudflare pair and renewed profiles publish through one current generation switch"
 
-# A structurally valid web role may remain from an older installation. It is
-# accepted as retained migration evidence, but is not one of the renewed roles.
-legacy_generation="$CERT_ROOT/web/generations/generation-20000101T000000Z-1-1"
-mkdir -p "$legacy_generation"
-chmod 0750 "$CERT_ROOT/web" "$CERT_ROOT/web/generations" "$legacy_generation"
-chmod g-s "$CERT_ROOT/web" "$CERT_ROOT/web/generations" "$legacy_generation"
-printf '%s\n' "${CERT_ROLE_VALUE_PREFIX}:web" > "$CERT_ROOT/web/$CERT_ROLE_MARKER"
-cp "$CERT_ROOT/dot/current/fullchain.pem" "$legacy_generation/fullchain.pem"
-cp "$CERT_ROOT/dot/current/privkey.pem" "$legacy_generation/privkey.pem"
-chmod 0644 "$CERT_ROOT/web/$CERT_ROLE_MARKER"
-chmod 0640 "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem"
-ln -s generations/generation-20000101T000000Z-1-1 "$CERT_ROOT/web/current"
-legacy_target="$(readlink -- "$CERT_ROOT/web/current")"
-legacy_checksum="$(cksum "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem")"
-renew_hook_main >/dev/null
-[[ "$(readlink -- "$CERT_ROOT/web/current")" == "$legacy_target" \
-   && "$(cksum "$legacy_generation/fullchain.pem" "$legacy_generation/privkey.pem")" == "$legacy_checksum" ]] \
-    || fail "renew hook refreshed or replaced retained legacy web material"
+current_before_skip="$(readlink -- "$UI_DIR/current")"
+: > "$PROFILE_LOG"
+generate_cert "$LE_LIVE_ROOT/example.test" \
+    'DNS:example.test,DNS:*.example.test,IP:192.0.2.10'
+FIVEGPN_SKIP_PROFILE_REFRESH=1 renew_hook_main >/dev/null
+[[ ! -s "$PROFILE_LOG" && "$(readlink -- "$UI_DIR/current")" == "$current_before_skip" ]] \
+    || fail "installer-deferred certificate publication performed an intermediate profile/current switch"
+pass "installer certificate publication can defer profiles to the enclosing single UI switch"
+
+# An exact-lineage deployment publishes valid role copies before attempting the
+# non-critical profile refresh. A missing UI helper must not roll those roles
+# back or fail the external Certbot hook; the profile-only entrypoint then
+# repairs the stale generation without republishing the already-matching roles.
+role_before_profile_failure="$(sha256sum "$CERT_ROOT/dot/current/fullchain.pem" | awk '{print $1}')"
+current_before_profile_failure="$(readlink -- "$UI_DIR/current")"
+generate_cert "$LE_LIVE_ROOT/example.test" \
+    'DNS:example.test,DNS:*.example.test,IP:192.0.2.10'
+original_load_ui_helper="$(declare -f load_ui_generation_helper)"
+load_ui_generation_helper() { return 99; }
+renew_hook_main >/dev/null \
+    || fail "profile dependency failure incorrectly failed exact-lineage role deployment"
+eval "$original_load_ui_helper"
+role_after_profile_failure="$(sha256sum "$CERT_ROOT/dot/current/fullchain.pem" | awk '{print $1}')"
+[[ "$role_after_profile_failure" != "$role_before_profile_failure" \
+   && "$(readlink -- "$UI_DIR/current")" == "$current_before_profile_failure" ]] \
+    || fail "profile dependency failure did not preserve the role-first/current-stable boundary"
+: > "$PROFILE_LOG"
+FIVEGPN_PROFILE_ONLY_REFRESH=1 renew_hook_main >/dev/null \
+    || fail "profile-only recovery could not repair the stale UI generation"
+[[ -s "$PROFILE_LOG" && "$(readlink -- "$UI_DIR/current")" != "$current_before_profile_failure" ]] \
+    || fail "profile-only recovery did not activate a repaired generation"
+pass "role-first profile failure converges through the profile-only recovery entrypoint"
+
+generator_original="$TMP/gen-ios-profile.original"
+cp "$IOSGEN" "$generator_original"
+current_before_generator_gate="$(readlink -- "$UI_DIR/current")"
+: > "$PROFILE_LOG"
+ln "$IOSGEN" "$TMP/gen-ios-profile.hardlink"
+if refresh_ios_profile_generation >/dev/null 2>&1; then
+    fail "hardlinked profile generator was accepted before the FD anchor"
+fi
+rm -f "$TMP/gen-ios-profile.hardlink"
+[[ ! -s "$PROFILE_LOG" && "$(readlink -- "$UI_DIR/current")" == "$current_before_generator_gate" ]] \
+    || fail "hardlinked generator reached candidate mutation or changed current"
+mv "$IOSGEN" "$TMP/gen-ios-profile.real"
+ln -s "$TMP/gen-ios-profile.real" "$IOSGEN"
+if refresh_ios_profile_generation >/dev/null 2>&1; then
+    fail "symlinked profile generator was accepted before the FD anchor"
+fi
+rm -f "$IOSGEN"
+mv "$TMP/gen-ios-profile.real" "$IOSGEN"
+[[ ! -s "$PROFILE_LOG" && "$(readlink -- "$UI_DIR/current")" == "$current_before_generator_gate" ]] \
+    || fail "symlinked generator reached candidate mutation or changed current"
+
+generator_race_log="$TMP/generator-race.log"
+generator_replacement="$TMP/gen-ios-profile.replacement"
+cat > "$generator_replacement" <<'EOF'
+#!/usr/bin/env bash
+printf 'NEW\n' >> "$GENERATOR_RACE_LOG"
+exit 99
+EOF
+chmod 0755 "$generator_replacement"
+{
+    head -n 1 "$generator_original"
+    cat <<'EOF'
+printf 'OLD\n' >> "$GENERATOR_RACE_LOG"
+mv -Tf -- "$GENERATOR_RACE_REPLACEMENT" "$GENERATOR_RACE_PATH"
+EOF
+    tail -n +2 "$generator_original"
+} > "$IOSGEN"
+chmod 0755 "$IOSGEN"
+current_before_generator_race="$(readlink -- "$UI_DIR/current")"
+if GENERATOR_RACE_LOG="$generator_race_log" \
+    GENERATOR_RACE_REPLACEMENT="$generator_replacement" GENERATOR_RACE_PATH="$IOSGEN" \
+    refresh_ios_profile_generation >/dev/null 2>&1; then
+    fail "generator path drift after FD anchoring was accepted"
+fi
+[[ "$(cat "$generator_race_log" 2>/dev/null || true)" == OLD \
+   && "$(readlink -- "$UI_DIR/current")" == "$current_before_generator_race" ]] \
+    || fail "FD anchoring did not execute OLD bytes or path drift changed current"
+find "$UI_DIR/generations" -mindepth 1 -maxdepth 1 -name '.candidate-generation-*' -print -quit \
+    | grep -q . && fail "generator path drift left an unpublished candidate"
+cp "$generator_original" "$IOSGEN"
+chmod 0755 "$IOSGEN"
+pass "generator symlink, hardlink, and anchored-path drift fail before current publication"
+
+mkdir -p "$CERT_ROOT/web"
+if renew_hook_main >/dev/null 2>&1; then
+    fail "renew hook accepted a retired web certificate role"
+fi
 rm -rf -- "$CERT_ROOT/web"
-pass "renew hook validates but does not refresh retained legacy web material"
+pass "renew hook rejects retired certificate roles"
 
 # SIGKILL cannot run traps. Root-owned, structurally valid unpublished
 # candidates from an interrupted prior run are scrubbed under the lock before
@@ -268,8 +394,8 @@ if (
     mkdir -p "$early"
     chmod 0700 "$early"
     chmod g-s "$early"
-    root_gid() { path_gid "$early"; }
-    interrupted_empty_generation_is_safe "$early" 99999
+    load_cert_role_helpers
+    cert_role_ctl_empty_preclaim_candidate_is_safe "$early" 99999
 ); then
     pass "root-group empty mktemp generation is safely recoverable"
 else
@@ -280,8 +406,8 @@ if (
     mkdir -p "$early"
     chmod 0700 "$early"
     chmod g-s "$early"
-    root_gid() { printf '%s\n' 99999; }
-    interrupted_empty_generation_is_safe "$early" "$(path_gid "$early")"
+    load_cert_role_helpers
+    cert_role_ctl_empty_preclaim_candidate_is_safe "$early" "$(path_gid "$early")"
 ); then
     pass "role-group empty pre-chmod generation is safely recoverable"
 else
@@ -293,9 +419,9 @@ before="$(role_checksums)"
 # A compromised runtime account can recreate marker bytes but cannot recreate
 # root ownership. Simulate that ownership drift through the metadata helper and
 # require the hook to reject it before touching any live role.
-original_path_uid="$(declare -f path_uid)"
+original_publication_fs_uid="$(declare -f publication_fs_uid)"
 UNSAFE_OWNER_PATH="$CERT_ROOT/console/$CERT_ROLE_MARKER"
-path_uid() {
+publication_fs_uid() {
     if [[ "$1" == "$UNSAFE_OWNER_PATH" ]]; then
         printf '%s\n' "$((EUID + 1))"
     else
@@ -305,7 +431,7 @@ path_uid() {
 if renew_hook_main >/dev/null 2>&1; then
     fail "service-owned certificate role marker was accepted"
 fi
-eval "$original_path_uid"
+eval "$original_publication_fs_uid"
 after="$(role_checksums)"
 [[ "$before" == "$after" ]] || fail "service-owned marker changed live role files"
 pass "service-owned role marker fails closed before publication"

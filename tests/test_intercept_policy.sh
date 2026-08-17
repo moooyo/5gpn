@@ -87,7 +87,11 @@ grep -Fq 'install_service_account "$FIVEGPN_SERVICE_USER" "$FIVEGPN_SERVICE_GROU
 grep -Fq 'ensure_intercept_certificates' "$INSTALL" || fail "interception certificate lifecycle is missing"
 grep -Fq 'systemctl enable --now 5gpn-intercept-cert.timer' "$INSTALL" || fail "interception leaf renewal timer is not always enabled"
 grep -Fq 'systemctl enable --now 5gpn-intercept-cert.path' "$INSTALL" || fail "interception certificate watcher is not enabled"
-grep -Fq '"${SCRIPT_DIR}"/etc/systemd/*.timer' "$INSTALL" || fail "interception certificate timer is not copied into installed bundles"
+install_files_body="$(sed -n '/^install_files()/,/^}/p' "$INSTALL")"
+managed_units_decl="$(sed -n '/^declare -ar MANAGED_SYSTEMD_UNITS=(/,/^)/p' "$INSTALL")"
+grep -Fq '5gpn-intercept-cert.timer' <<<"$managed_units_decl" \
+    && grep -Fq 'for u in "${MANAGED_SYSTEMD_UNITS[@]}"' <<<"$install_files_body" \
+    || fail "interception certificate timer is absent from the exact installed-unit manifest"
 grep -Fq 'intercept-cert-renew.sh" --installer-lock-held' "$INSTALL" \
     && fail "the installer mints leaves again instead of leaving them to the watcher"
 # One path to a leaf: the engine writes its request, the path unit sees it
@@ -121,7 +125,8 @@ grep -Fq 'remove_fixed_owned_dir "$INTERCEPT_STATE_DIR"' "$INSTALL" || fail "pur
 
 # The engine writes its own document with interception off, so the installer
 # must not seed one -- two writers of one document is how they drift.
-grep -Fq '"mitm"' "$INSTALL" && fail "the installer seeds an interception document the engine owns"
+grep -Eq '^(seed|write|render)_intercept_(document|config)\(\)' "$INSTALL" \
+    && fail "the installer seeds an interception document the engine owns"
 
 # --- the shared trust profile ------------------------------------------------
 grep -Fq 'ios-intercept-ca.mobileconfig' "$PROFILE" || fail "interception CA profile generation is missing"
@@ -132,13 +137,11 @@ if [[ -d "$ROOT/extensions" ]] && find "$ROOT/extensions" -mindepth 1 -print -qu
     fail "core repository still vendors extension source"
 fi
 retired_client="$(printf '%s%s' 'lo' 'on')"
-grep -Rni "$retired_client" \
-    "$ROOT/README.md" "$ROOT/README.en.md" "$ROOT/docs/architecture.md" \
-    "$ROOT/docs/pre-v5-upgrade.md" 2>/dev/null | grep -q . \
+grep -Rni "$retired_client" "$ROOT/README.md" "$ROOT/README.en.md" \
+    "$ROOT/docs/architecture.md" 2>/dev/null | grep -q . \
     && fail "retired third-party plugin compatibility is still present"
-# Only the seed template. docs/architecture.md and migrate-to-monolith.sh name
-# these identifiers on purpose -- they are what the upgrade path removes, and a
-# migration guide that cannot say what it removes is useless.
+# Only the seed template is checked here; retired identifiers must not return to
+# the configuration published for a new installation.
 grep -niE 'builtin-wloc|MODULE-MITM|MODULE-INTERCEPT|intercept-egress|RUNTIME-OVERLAY' \
     "$ROOT/etc/mihomo/config.yaml.tmpl" 2>/dev/null | grep -q . \
     && fail "retired interception identifiers came back into the seed template"

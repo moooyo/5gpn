@@ -44,22 +44,57 @@ grep -Fq 'report_install_failure' <<<"$finish_fn" \
 grep -Fq 'release_install_cert_lock' <<<"$finish_fn" \
     && grep -Fq 'release_install_lock' <<<"$finish_fn" \
     && grep -Fq 'cleanup_artifact_stage' <<<"$finish_fn" \
-    && pass "the unwind path releases both locks and drops staging" \
+    && grep -Fq 'restore_global_certbot_timer' <<<"$finish_fn" \
+    && pass "the unwind path restores external timer state, releases both locks, and drops staging" \
     || fail "a failed install can leak a lock or its staging directory"
 grep -Fq 'INSTALL_PUBLICATION_STARTED=1' <<<"$full_fn" \
     && grep -Fq 'INSTALL_PUBLICATION_STARTED:-0' <<<"$finish_fn" \
     && pass "partial-install reporting is gated by the explicit publication boundary" \
     || fail "prepublication failures are still reported as partial installs"
+deps_line="$(line_of "$full_fn" 'install_deps')"
+timer_preflight_line="$(line_of "$full_fn" 'preflight_global_certbot_timer_state')"
+timer_pause_line="$(line_of "$full_fn" 'pause_global_certbot_timer')"
+timer_pause_final_line="$(grep -nF 'pause_global_certbot_timer' <<<"$full_fn" | tail -1 | cut -d: -f1)"
+timer_pause_count="$(grep -Fc 'pause_global_certbot_timer' <<<"$full_fn")"
+publication_boundary_line="$(line_of "$full_fn" 'INSTALL_PUBLICATION_STARTED=1')"
+[[ -n "$deps_line" && -n "$timer_preflight_line" && -n "$timer_pause_line" \
+   && -n "$timer_pause_final_line" && -n "$publication_boundary_line" \
+   && "$timer_pause_count" -ge 2 \
+   && "$deps_line" -lt "$timer_preflight_line" \
+   && "$timer_preflight_line" -lt "$timer_pause_line" \
+   && "$timer_pause_line" -le "$timer_pause_final_line" \
+   && "$timer_pause_final_line" -lt "$publication_boundary_line" \
+   && "$timer_pause_line" -lt "$publication_boundary_line" ]] \
+    || fail "distro Certbot timer is not checked and captured before publication"
+pass "distro Certbot timer compatibility and snapshot finish before project publication"
+claim_root_line="$(line_of "$full_fn" 'claim_project_roots')"
+runtime_stop_line="$(line_of "$full_fn" 'stop_managed_runtime_units')"
+runtime_revalidate_line="$(grep -nF 'validate_existing_runtime_documents' <<<"$full_fn" | tail -1 | cut -d: -f1)"
+first_payload_line="$(line_of "$full_fn" 'publish_verified_gum')"
+[[ -n "$claim_root_line" && -n "$runtime_stop_line" \
+   && -n "$runtime_revalidate_line" && -n "$first_payload_line" \
+   && "$claim_root_line" -lt "$runtime_stop_line" \
+   && "$runtime_stop_line" -lt "$runtime_revalidate_line" \
+   && "$runtime_revalidate_line" -lt "$first_payload_line" ]] \
+    || fail "runtime writers are not stopped and Core state revalidated immediately after publication begins"
+pass "runtime writers quiesce before the first payload publication"
 
-timer_restore_line="$(line_of "$full_fn" 'restore_global_certbot_timer_after_success')"
+finish_timer_line="$(line_of "$finish_fn" 'restore_global_certbot_timer')"
+finish_release_line="$(line_of "$finish_fn" 'release_install_cert_lock')"
+[[ -n "$finish_timer_line" && -n "$finish_release_line" \
+   && "$finish_timer_line" -lt "$finish_release_line" ]] \
+    || fail "failure cleanup releases the certificate lock before restoring the distro timer"
+pass "failure cleanup restores the distro timer while the certificate lock is held"
+
+timer_restore_line="$(line_of "$full_fn" 'restore_global_certbot_timer')"
 cleanup_line="$(line_of "$full_fn" 'cleanup_artifact_stage')"
 release_line="$(line_of "$full_fn" 'release_install_cert_lock')"
 if [[ -n "$timer_restore_line" && -n "$cleanup_line" && -n "$release_line" \
-   && "$release_line" -lt "$timer_restore_line" \
-   && "$timer_restore_line" -lt "$cleanup_line" ]]; then
-    pass "a verified deployment restores the distro timer before dropping staging"
+   && "$timer_restore_line" -lt "$release_line" \
+   && "$release_line" -lt "$cleanup_line" ]]; then
+    pass "a verified deployment restores the distro timer before releasing the certificate lock"
 else
-    fail "success-path timer restore and stage cleanup are out of order"
+    fail "success-path timer restore and certificate-lock release are out of order"
 fi
 
 # Exercise both locks and prove that they are independently exclusive.
@@ -67,6 +102,10 @@ lock_root="$TMP/locks"
 mkdir -m 0700 "$lock_root"
 INSTALL_LOCK_FILE="$lock_root/install.lock"
 CERT_RENEW_LOCK_FILE="$lock_root/cert.lock"
+CONFIGURE_RUNTIME_GATE_RECORD="$lock_root/configure-runtime-gate"
+CONFIGURE_RUNTIME_GATE_JOB="$lock_root/configure-runtime-gate.job"
+CONFIGURE_RUNTIME_GATE_ACK="$lock_root/configure-runtime-gate.ack"
+CONFIGURE_RUNTIME_GATE_RELEASE="$lock_root/configure-runtime-gate.release"
 INSTALL_LOCK_HELD=0
 INSTALL_CERT_LOCK_HELD=0
 file_uid() { printf '0\n'; }
@@ -146,6 +185,11 @@ export INSTALL_SH_LIB_ONLY
 source "$TEST_INSTALL"
 INSTALL_LOCK_FILE="$TEST_INSTALL_LOCK_FILE"
 CERT_RENEW_LOCK_FILE="$TEST_CERT_LOCK_FILE"
+gate_root="$(dirname -- "$INSTALL_LOCK_FILE")"
+CONFIGURE_RUNTIME_GATE_RECORD="$gate_root/configure-runtime-gate"
+CONFIGURE_RUNTIME_GATE_JOB="$gate_root/configure-runtime-gate.job"
+CONFIGURE_RUNTIME_GATE_ACK="$gate_root/configure-runtime-gate.ack"
+CONFIGURE_RUNTIME_GATE_RELEASE="$gate_root/configure-runtime-gate.release"
 file_uid() { printf '0\n'; }
 file_gid() { printf '0\n'; }
 file_mode() { [[ -d "$1" ]] && printf '700\n' || printf '600\n'; }
@@ -228,7 +272,8 @@ unset -f systemctl wait_service_ready resolve_mihomo_listen_ips
 
 # The unwind path still owns three things: it surfaces its own failures, it
 # preserves the original exit status, and a failed run says plainly that the
-# host was left as it stands. Nothing here restores anything.
+# published host was left as it stands. External timer state is restored, but
+# project publication is never rolled back.
 notice="$TMP/unwind-notice"
 set +e
 (

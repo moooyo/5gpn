@@ -725,18 +725,17 @@ fetch_bundle() { # fetch_bundle <repo> <channel> <release-tag>; 10=asset absent,
 usage() {
     cat <<'EOF'
 5gpn quick installer
-Usage: quick-install.sh [--beta] [installer-command]
+Usage: quick-install.sh [--beta]
 
   (no channel option)  Download the latest official release.
   --beta              Download the latest beta only when its base version is
                       newer than latest official; never downgrade to an older line.
 
-Installer command:
-  upgrade-reset-mihomo  Explicit TTY-confirmed upgrade that backs up and replaces
-                        the complete operator-owned mihomo config.
-
 The selected release is pinned to one exact tag. A missing or older beta never
 falls back to the official channel and never downgrades it.
+
+Use `sudo 5gpn configure` for a current installed deployment. Configure never
+downloads or switches a release bundle.
 
 Host baseline: Linux amd64, kernel 5.7+, systemd 257+, and pure cgroup v2 with
 the memory and pids controllers. Unsupported hosts fail before source allocation.
@@ -757,7 +756,11 @@ main() {
         red "--beta must be specified exactly once as the first argument."
         return 2
     fi
-    install_args=("$@")
+    if (( $# > 0 )); then
+        red "The quick installer performs only a full install. Use 'sudo 5gpn configure' for an installed deployment."
+        return 2
+    fi
+    install_args=()
     [[ "$channel" == stable ]] || install_args=(--beta "${install_args[@]}")
 
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then

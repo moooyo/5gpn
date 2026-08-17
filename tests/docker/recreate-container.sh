@@ -32,9 +32,13 @@ project="$(jq -r '.[0].Config.Labels["com.docker.compose.project"] // empty' <<<
 if [[ -z "$project" && "$FIVEGPN_PROBE_ACCEPTANCE_MODE" == development ]]; then
     project="$FIVEGPN_PROBE_DEVELOPMENT_PROJECT"
 fi
-volume="$(jq -er '
+data_volume="$(jq -er '
   [.[0].Mounts[] | select(.Type == "volume" and .Destination == "/etc/5gpn")] |
   if length == 1 then .[0].Name else error("volume") end
+' <<<"$inspect")"
+ui_volume="$(jq -er '
+  [.[0].Mounts[] | select(.Type == "volume" and .Destination == "/opt/5gpn/ui")] |
+  if length == 1 then .[0].Name else error("ui volume") end
 ' <<<"$inspect")"
 bootstrap_source="$(jq -er '
   [.[0].Mounts[] | select(.Type == "bind" and .Destination == "/run/5gpn-bootstrap-input/config.env")] |
@@ -51,7 +55,9 @@ secret_source="$(jq -er '
    && "$network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ \
    && "$network" != host && "$network" != bridge && "$network" != default && "$network" != none \
    && "$project" =~ ^[a-z0-9][a-z0-9_-]*$ \
-   && "$volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+   && "$data_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ \
+   && "$ui_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ \
+   && "$data_volume" != "$ui_volume" ]] \
     || probe_die 'candidate identity is unsafe for fixed recreation'
 [[ "$(docker network inspect "$network" | jq -r '.[0].Driver')" == bridge ]] \
     || probe_die 'candidate network is not a user-defined bridge'
@@ -92,7 +98,7 @@ rollback_recreate() {
 }
 trap rollback_recreate EXIT
 
-docker stop --time 30 "$name" >/dev/null
+docker stop --time 45 "$name" >/dev/null
 stopped=true
 stopped_state="$(docker inspect "$name" | jq -c \
     '.[0].State | {Running,ExitCode,OOMKilled,Error}')"
@@ -114,8 +120,6 @@ new_id="$(docker run --detach --pull never \
     --publish "${FIVEGPN_PROBE_HOST_BIND_IP}:${FIVEGPN_PROBE_HOST_PORT_80}:80/tcp" \
     --publish "${FIVEGPN_PROBE_HOST_BIND_IP}:${FIVEGPN_PROBE_HOST_PORT_443}:9443/tcp" \
     --publish "${FIVEGPN_PROBE_HOST_BIND_IP}:${FIVEGPN_PROBE_HOST_PORT_443}:9443/udp" \
-    --publish "${FIVEGPN_PROBE_HOST_BIND_IP}:${FIVEGPN_PROBE_HOST_PORT_5060}:5060/tcp" \
-    --publish "${FIVEGPN_PROBE_HOST_BIND_IP}:${FIVEGPN_PROBE_HOST_PORT_5060}:5060/udp" \
     --publish "${FIVEGPN_PROBE_HOST_BIND_IP}:${FIVEGPN_PROBE_HOST_PORT_8080}:8080/tcp" \
     --publish "${FIVEGPN_PROBE_HOST_BIND_IP}:${FIVEGPN_PROBE_HOST_PORT_8443}:8443/tcp" \
     --sysctl net.ipv4.ip_unprivileged_port_start=0 \
@@ -129,18 +133,18 @@ new_id="$(docker run --detach --pull never \
     --pids-limit 256 \
     --restart unless-stopped \
     --stop-signal SIGTERM \
-    --stop-timeout 30 \
+    --stop-timeout 45 \
     --label "com.docker.compose.project=${project}" \
     --label 'com.docker.compose.service=gateway' \
     --label 'com.docker.compose.oneoff=False' \
-    --mount "type=volume,src=${volume},dst=/etc/5gpn" \
+    --mount "type=volume,src=${data_volume},dst=/etc/5gpn" \
+    --mount "type=volume,src=${ui_volume},dst=/opt/5gpn/ui" \
     --mount "type=bind,src=${bootstrap_source},dst=/run/5gpn-bootstrap-input/config.env,readonly" \
     --mount "type=bind,src=${secret_source},dst=/run/secrets/cloudflare_api_token,readonly" \
     --tmpfs /run/5gpn:rw,uid=10001,gid=10001,mode=0700 \
     --tmpfs /run/5gpn-bootstrap:rw,uid=10001,gid=10001,mode=0700 \
     --tmpfs /tmp:rw,uid=10001,gid=10001,mode=1777 \
     --tmpfs /var/tmp:rw,uid=10001,gid=10001,mode=1777 \
-    --tmpfs /opt/5gpn/ui:rw,uid=10001,gid=10001,mode=0755 \
     "$image")"
 [[ "$new_id" =~ ^[0-9a-f]{64}$ \
    && "$new_id" == "$(docker inspect --format '{{.Id}}' "$name")" ]] \

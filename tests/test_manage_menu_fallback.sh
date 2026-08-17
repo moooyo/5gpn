@@ -138,11 +138,25 @@ systemctl() {
 }
 CERT_MODE_TEST=cloudflare
 CERT_LINEAGE_TEST=owned
+CERT_BASE_TEST=example.com
+CONFIG_MODE_TEST=cloudflare
+CONFIG_BASE_TEST=example.com
+OWNERSHIP_MATCH_TEST=1
 cert_provenance_get() {
     case "$1" in
         mode) printf '%s' "$CERT_MODE_TEST" ;;
+        base) printf '%s' "$CERT_BASE_TEST" ;;
         certbot_lineage) printf '%s' "$CERT_LINEAGE_TEST" ;;
     esac
+}
+cfg_get() {
+    case "$1" in
+        CERT_MODE) printf '%s' "$CONFIG_MODE_TEST" ;;
+        DNS_BASE_DOMAIN) printf '%s' "$CONFIG_BASE_TEST" ;;
+    esac
+}
+certbot_lineage_owned_by_5gpn() {
+    [[ "$1" == "$CONFIG_BASE_TEST" && "$OWNERSHIP_MATCH_TEST" == 1 ]]
 }
 owned_output="$(manage_screen_services)"
 grep -Fq '❌ 5gpn-certbot-renew.timer' <<< "$owned_output" \
@@ -158,12 +172,27 @@ for case_value in 'debug|none|不适用' \
                   'cloudflare|reused|外部续期' \
                   'http-01|missing|需修复'; do
     IFS='|' read -r CERT_MODE_TEST CERT_LINEAGE_TEST expected <<< "$case_value"
+    CONFIG_MODE_TEST="$CERT_MODE_TEST"
+    OWNERSHIP_MATCH_TEST=0
     : > "$UNIT_CALLS"
     service_output="$(manage_screen_services)"
     grep -Fq "$expected" <<< "$service_output" \
         || fail "$CERT_MODE_TEST/$CERT_LINEAGE_TEST renewal state omitted '$expected'"
     ! grep -Fqx '5gpn-certbot-renew.timer' "$UNIT_CALLS" \
         || fail "$CERT_MODE_TEST/$CERT_LINEAGE_TEST needlessly queried the inapplicable renewal timer"
+done
+
+for conflict in owned reused; do
+    CERT_MODE_TEST=cloudflare
+    CONFIG_MODE_TEST=cloudflare
+    CERT_LINEAGE_TEST="$conflict"
+    if [[ "$conflict" == owned ]]; then OWNERSHIP_MATCH_TEST=0; else OWNERSHIP_MATCH_TEST=1; fi
+    : > "$UNIT_CALLS"
+    service_output="$(manage_screen_services)"
+    grep -Fq 'renewal needs repair' <<< "$service_output" \
+        || fail "$conflict provenance/ownership conflict was displayed as healthy"
+    ! grep -Fqx '5gpn-certbot-renew.timer' "$UNIT_CALLS" \
+        || fail "$conflict provenance/ownership conflict queried the timer as applicable"
 done
 cert_provenance_get() { return 1; }
 : > "$UNIT_CALLS"

@@ -17,6 +17,9 @@
 !etc/mihomo/
 !etc/mihomo/config.yaml.tmpl
 !scripts/
+!scripts/publication-fs.sh
+!scripts/cert-role-ctl.sh
+!scripts/ui-generation.sh
 !scripts/gen-ios-profile.sh
 
 # Never let local bootstrap material enter an image build context.

@@ -11,6 +11,9 @@ ENTRYPOINT="$ROOT/docker/entrypoint.sh"
 PREPARE="$ROOT/docker/prepare-components.sh"
 SECCOMP="$ROOT/docker/seccomp-5gpn.json"
 BOOTSTRAP_EXAMPLE="$ROOT/docker/bootstrap/config.env.example"
+PINS_ENV="$ROOT/release/pins.env"
+PINS_LIBRARY="$ROOT/release/pins.sh"
+MIHOMO_TEMPLATE="$ROOT/etc/mihomo/config.yaml.tmpl"
 CHECKS="$ROOT/.github/workflows/checks.yml"
 RELEASE="$ROOT/.github/workflows/release.yml"
 FAIL=0
@@ -28,6 +31,11 @@ required=(
     docker/docker-intercept-cert.sh
     docker/seccomp-5gpn.json
     docker/bootstrap/config.env.example
+    release/pins.env
+    release/pins.sh
+    scripts/publication-fs.sh
+    scripts/cert-role-ctl.sh
+    scripts/ui-generation.sh
     docs/docker.md
     tests/container-acceptance.sh
     tests/docker/probe-lib.sh
@@ -46,8 +54,16 @@ if grep -Fxq '# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813
    && grep -Fq 'snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/' "$DOCKERFILE" \
    && grep -Fxq 'USER 10001:10001' "$DOCKERFILE" \
    && grep -Fq 'FIVEGPN_RUNTIME=container' "$DOCKERFILE" \
+   && grep -Fxq 'VOLUME ["/etc/5gpn", "/opt/5gpn/ui"]' "$DOCKERFILE" \
+   && awk '
+        /install -d -o 10001 -g 10001 -m 0755/ { inside=1; next }
+        inside && /\/opt\/5gpn\/ui/ { found=1 }
+        inside && $0 !~ /\\$/ { inside=0 }
+        END { exit !found }
+      ' "$DOCKERFILE" \
+   && grep -Fq 'scripts/ui-generation.sh /opt/5gpn/scripts/ui-generation.sh' "$DOCKERFILE" \
    && grep -Fq 'ENTRYPOINT ["/opt/5gpn/bin/docker-entrypoint.sh"]' "$DOCKERFILE"; then
-    pass "image platform, base digest, runtime mode, identity, and PID-1 entrypoint are fixed"
+    pass "image platform, identity, persistent roots, and PID-1 entrypoint are fixed"
 else
     fail "Dockerfile does not lock the initial Linux amd64 runtime identity"
 fi
@@ -71,21 +87,27 @@ else
     fail "image omits its license delivery or excludes the notice inputs"
 fi
 
-for pin in MIHOMO_REPO MIHOMO_VERSION MIHOMO_SHA256 ZASH_REPO ZASH_VERSION ZASH_SHA256; do
-    grep -Fq "read_pin $pin" "$PREPARE" \
-        || fail "component preparation does not read $pin from install.sh"
-done
-if grep -Fq 'verify_digest "$stage/mihomo.gz" "$MIHOMO_SHA256"' "$PREPARE" \
+if grep -Fxq 'PINS_ENV="$ROOT/release/pins.env"' "$PREPARE" \
+   && grep -Fxq 'PINS_LIBRARY="$ROOT/release/pins.sh"' "$PREPARE" \
+   && grep -Fq 'source "$PINS_LIBRARY"' "$PREPARE" \
+   && grep -Fq 'load_release_pins "$PINS_ENV"' "$PREPARE" \
+   && grep -Fq 'release_download_url mihomo' "$PREPARE" \
+   && grep -Fq 'release_download_url zashboard' "$PREPARE" \
+   && grep -Fq 'release_artifact_sha256 mihomo' "$PREPARE" \
+   && grep -Fq 'release_artifact_sha256 zashboard' "$PREPARE" \
+   && grep -Fq 'verify_digest "$stage/mihomo.gz" "$MIHOMO_SHA256"' "$PREPARE" \
    && grep -Fq 'verify_digest "$stage/zashboard.zip" "$ZASH_SHA256"' "$PREPARE" \
    && grep -Fq 'verify_digest "$stage/bootstrap-ca.pem" "$CA_BUNDLE_SHA256"' "$PREPARE" \
    && grep -Fq '"$binary" 5gpn-container-contract' "$PREPARE" \
-   && grep -Fq "printf '%s\\n' '5gpn-container-runtime-v1' | cmp -s - \"\$output\"" "$PREPARE" \
-   && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v1' "$PREPARE" \
+   && grep -Fq "printf '%s\\n' '5gpn-container-runtime-v2' | cmp -s - \"\$output\"" "$PREPARE" \
+   && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v2' "$PREPARE" \
    && grep -Fq 'CA_BUNDLE_SHA256=' "$PREPARE" \
-   && grep -Fq 'manifest.env' "$PREPARE"; then
-    pass "Docker preparation verifies both install.sh pins and records the manifest"
+   && grep -Fq 'manifest.env' "$PREPARE" \
+   && ! grep -Fq 'read_pin ' "$PREPARE" \
+   && ! grep -Fq 'install.sh' "$PREPARE"; then
+    pass "Docker preparation consumes the centralized pins and requires runtime contract v2"
 else
-    fail "Docker preparation does not bind both component digests before use"
+    fail "Docker preparation bypasses the centralized pin generation or v2 handshake"
 fi
 
 service_count="$(awk '
@@ -108,8 +130,6 @@ compose_required=(
     '      - "0.0.0.0:80:80/tcp"'
     '      - "0.0.0.0:443:9443/tcp"'
     '      - "0.0.0.0:443:9443/udp"'
-    '      - "0.0.0.0:5060:5060/tcp"'
-    '      - "0.0.0.0:5060:5060/udp"'
     '      - "0.0.0.0:8080:8080/tcp"'
     '      - "0.0.0.0:8443:8443/tcp"'
     '    sysctls:'
@@ -122,9 +142,13 @@ compose_required=(
     '      - no-new-privileges=true'
     '      - seccomp=./docker/seccomp-5gpn.json'
     '    restart: unless-stopped'
-    '    stop_grace_period: 30s'
+    '    stop_grace_period: 45s'
+    '        source: fivegpn-data'
     '        target: /etc/5gpn'
+    '        source: fivegpn-ui'
+    '        target: /opt/5gpn/ui'
     '    name: ${FIVEGPN_DATA_VOLUME:-fivegpn-data}'
+    '    name: ${FIVEGPN_UI_VOLUME:-fivegpn-ui}'
     '  cloudflare_api_token:'
     'networks:'
     '    driver: bridge'
@@ -135,30 +159,76 @@ for contract in "${compose_required[@]}"; do
         || fail "Compose contract is missing: $contract"
 done
 port_mapping_count="$(grep -Ec '^      - "0\.0\.0\.0:[0-9]+:[0-9]+/(tcp|udp)"$' "$COMPOSE")"
-if [[ "$port_mapping_count" == 8 ]] \
+if [[ "$port_mapping_count" == 6 ]] \
    && ! grep -Eq '^      - "0\.0\.0\.0:(53|5353|5354):' "$COMPOSE" \
-   && ! grep -Eq '^      - "0\.0\.0\.0:[0-9]+:(53|5353|5354|443)/(tcp|udp)"$' "$COMPOSE" \
+   && ! grep -Eq '^      - "0\.0\.0\.0:[0-9]+:(53|5353|5354|443|5060)/(tcp|udp)"$' "$COMPOSE" \
+   && ! grep -Fq '/opt/5gpn/ui:uid=10001' "$COMPOSE" \
    && ! grep -Eiq 'network_mode:|cap_add:|NET_BIND_SERVICE|privileged:[[:space:]]*true|SYS_ADMIN|seccomp[=:]unconfined|docker\.sock|/sys/fs/cgroup|FIVEGPN_IMAGE:-.*latest' "$COMPOSE"; then
-    pass "Compose publishes only the eight IPv4 bridge mappings, grants no capability or privilege escape, and has no movable image default"
+    pass "Compose publishes six IPv4 mappings, persists both state roots, and grants no privilege escape"
 else
     fail "Compose widened its IPv4-only port, privilege, network, or image boundary"
 fi
 
+main_body="$(sed -n '/^main()/,/^}/p' "$ENTRYPOINT")"
+legacy_line="$(grep -nF 'reject_legacy_footprints' <<<"$main_body" | tail -1 | cut -d: -f1)"
+config_candidates_line="$(grep -nF 'validate_config_candidates' <<<"$main_body" | tail -1 | cut -d: -f1)"
+publication_candidates_line="$(grep -nF 'validate_publication_candidates' <<<"$main_body" | tail -1 | cut -d: -f1)"
+state_line="$(grep -nF 'validate_runtime_documents' <<<"$main_body" | tail -1 | cut -d: -f1)"
+ui_line="$(grep -nF 'validate_existing_ui_generation' <<<"$main_body" | tail -1 | cut -d: -f1)"
+inspect_line="$(grep -nF 'inspect_existing_operator_config' <<<"$main_body" | tail -1 | cut -d: -f1)"
+cert_preflight_line="$(grep -nF 'preflight_certificate_state' <<<"$main_body" | tail -1 | cut -d: -f1)"
+config_scrub_line="$(grep -nF 'scrub_config_candidates' <<<"$main_body" | tail -1 | cut -d: -f1)"
+publication_scrub_line="$(grep -nF 'scrub_publication_candidates' <<<"$main_body" | tail -1 | cut -d: -f1)"
+publish_line="$(grep -nF 'ensure_dns_env' <<<"$main_body" | tail -1 | cut -d: -f1)"
+cert_line="$(grep -nF 'run_sync "$INTERCEPT_CERT_HELPER" init-ca' <<<"$main_body" | tail -1 | cut -d: -f1)"
+public_cert_line="$(grep -nF 'bootstrap_public_certificate' <<<"$main_body" | tail -1 | cut -d: -f1)"
 if grep -Fq 'exec "$MIHOMO_BIN"' "$ENTRYPOINT" \
    && grep -Fq 'wait "$child_pid"' "$ENTRYPOINT" \
    && grep -Fq 'safe_private_input_file "$BOOTSTRAP_INPUT"' "$ENTRYPOINT" \
    && grep -Fq 'safe_private_input_file "$CF_SECRET"' "$ENTRYPOINT" \
    && grep -Fq 'Docker supports only CERT_MODE=cloudflare.' "$ENTRYPOINT" \
+   && grep -Fq '5gpn-container-runtime-v2' "$ENTRYPOINT" \
+   && grep -Fq '5gpn-state validate --owner-uid "$CURRENT_UID"' "$ENTRYPOINT" \
+   && grep -Fq '5gpn-config inspect-controller' "$ENTRYPOINT" \
+   && grep -Fq -- '--owner-uid "$CURRENT_UID" --config "$MIHOMO_CONFIG"' "$ENTRYPOINT" \
+   && grep -Fq '.version == 2' "$ENTRYPOINT" \
+   && grep -Fq '.external_ui == "/opt/5gpn/ui/current"' "$ENTRYPOINT" \
+   && grep -Fq 'DOCKER_SCHEMA_MARKER_VALUE=5gpn-docker-state-v2' "$ENTRYPOINT" \
+   && grep -Fq 'DNS_BASE_DOMAIN|DNS_PUBLIC_IP|DNS_GATEWAY_IP|DNS_MIHOMO_LISTEN_IPS|CERT_MODE|CERT_EMAIL' "$ENTRYPOINT" \
+   && ! grep -Fq 'DNS_MIHOMO_SECRET' "$ENTRYPOINT" \
+   && ! grep -Fq 'DNS_MIHOMO_SECRET' "$BOOTSTRAP_EXAMPLE" \
    && grep -Fxq 'readonly DOCKER_LISTEN_IP=0.0.0.0' "$ENTRYPOINT" \
    && grep -Fxq 'readonly DOCKER_TLS_LISTEN_PORT=9443' "$ENTRYPOINT" \
    && grep -Fq 'port: %s, network: [tcp, udp], target: %s:443' "$ENTRYPOINT" \
    && grep -Fq '"$DOCKER_LISTEN_IP" "$DOCKER_TLS_LISTEN_PORT" "$CONSOLE_DOMAIN"' "$ENTRYPOINT" \
-   && grep -Fq 'DNS_MIHOMO_CONTROLLER=127.0.0.1:443' "$ENTRYPOINT" \
-   && ! grep -Fq 'BOOTSTRAP[DNS_MIHOMO_LISTEN_IPS]' "$ENTRYPOINT" \
-   && ! grep -Eq '^[[:space:]]*DNS_MIHOMO_LISTEN_IPS=' "$BOOTSTRAP_EXAMPLE"; then
-    pass "entrypoint secures inputs, fixes bridge listeners, preserves the public 443 target, waits children, and execs the monolith"
+   && ! grep -Fq 'port: 5060' "$ENTRYPOINT" \
+   && ! grep -Fq 'IP-CIDR,' "$ENTRYPOINT" \
+   && grep -Fq 'external-ui: /opt/5gpn/ui/current' "$MIHOMO_TEMPLATE" \
+   && [[ "$legacy_line" =~ ^[0-9]+$ \
+      && "$config_candidates_line" =~ ^[0-9]+$ \
+      && "$publication_candidates_line" =~ ^[0-9]+$ \
+      && "$state_line" =~ ^[0-9]+$ && "$ui_line" =~ ^[0-9]+$ \
+      && "$inspect_line" =~ ^[0-9]+$ \
+      && "$cert_preflight_line" =~ ^[0-9]+$ \
+      && "$config_scrub_line" =~ ^[0-9]+$ \
+      && "$publication_scrub_line" =~ ^[0-9]+$ \
+      && "$publish_line" =~ ^[0-9]+$ && "$cert_line" =~ ^[0-9]+$ \
+      && "$public_cert_line" =~ ^[0-9]+$ \
+      && "$config_candidates_line" -lt "$config_scrub_line" \
+      && "$publication_candidates_line" -lt "$publication_scrub_line" \
+      && "$legacy_line" -lt "$publish_line" && "$state_line" -lt "$publish_line" \
+      && "$ui_line" -lt "$publish_line" && "$inspect_line" -lt "$publish_line" \
+      && "$state_line" -lt "$config_scrub_line" \
+      && "$ui_line" -lt "$publication_scrub_line" \
+      && "$inspect_line" -lt "$config_scrub_line" \
+      && "$cert_preflight_line" -lt "$cert_line" \
+      && "$config_scrub_line" -lt "$cert_line" \
+      && "$publication_scrub_line" -lt "$cert_line" \
+      && "$cert_line" -lt "$public_cert_line" \
+      && "$public_cert_line" -lt "$publish_line" ]]; then
+    pass "entrypoint performs the current read-only preflight before any state or certificate publication"
 else
-    fail "entrypoint drifted from the fixed bridge-listener or synchronous single-PID contract"
+    fail "entrypoint bypasses the v2 state, controller, legacy, UI, or publication boundary"
 fi
 
 if command -v jq >/dev/null 2>&1 \
@@ -176,7 +246,8 @@ fi
 if grep -Fq 'needs: artifact-pins' "$CHECKS" \
    && grep -Fq 'bash docker/prepare-components.sh' "$CHECKS" \
    && grep -Fq "grep -Fxq 'MIHOMO_SOURCE=pinned-release'" "$CHECKS" \
-   && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v1' "$CHECKS" \
+   && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v2' "$CHECKS" \
+   && grep -Fq 'release/pins.env through release/pins.sh' "$CHECKS" \
    && grep -Fq 'docker build --platform linux/amd64' "$CHECKS" \
    && grep -Fq 'tests/container-acceptance.sh on test-env' "$CHECKS" \
    && ! grep -Eiq 'docker run .*privileged|seccomp[=:]unconfined' "$CHECKS"; then
@@ -188,7 +259,8 @@ fi
 if grep -Fq 'packages: write' "$RELEASE" \
    && grep -Fq 'IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}' "$RELEASE" \
    && grep -Fq "grep -Fxq 'MIHOMO_SOURCE=pinned-release'" "$RELEASE" \
-   && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v1' "$RELEASE" \
+   && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v2' "$RELEASE" \
+   && grep -Fq 'release_artifact_sha256 mihomo' "$RELEASE" \
    && grep -Fq 'remote_id" == "$candidate_id" && "$remote_labels" == "$candidate_labels' "$RELEASE" \
    && grep -Fq '(has("manifests") | not)' "$RELEASE" \
    && grep -Fq 'body="OCI image: ${image_ref}"' "$RELEASE" \
@@ -218,8 +290,13 @@ fi
 
 ACCEPTANCE="$ROOT/tests/container-acceptance.sh"
 if grep -Fq 'FIVEGPN_EXPECTED_COMMIT' "$ACCEPTANCE" \
+   && grep -Fq 'FIVEGPN_ACCEPTANCE_TARGET' "$ACCEPTANCE" \
+   && grep -Fq 'disposable' "$ACCEPTANCE" \
    && grep -Fq 'FIVEGPN_EXPECTED_MIHOMO_SHA256' "$ACCEPTANCE" \
    && grep -Fq 'FIVEGPN_EXPECTED_MIHOMO_BINARY_SHA256' "$ACCEPTANCE" \
+   && grep -Fq 'release/pins.env' "$ACCEPTANCE" \
+   && grep -Fq 'release/pins.sh' "$ACCEPTANCE" \
+   && grep -Fq 'release_artifact_sha256 mihomo' "$ACCEPTANCE" \
    && grep -Fq 'git -C "$ROOT" rev-parse --show-toplevel' "$ACCEPTANCE" \
    && grep -Fq "git -C \"\$ROOT\" rev-parse --verify 'HEAD^{commit}'" "$ACCEPTANCE" \
    && grep -Fq 'git -C "$ROOT" ls-files --error-unmatch -- "$relative"' "$ACCEPTANCE" \
@@ -227,6 +304,9 @@ if grep -Fq 'FIVEGPN_EXPECTED_COMMIT' "$ACCEPTANCE" \
    && grep -Fq 'git -C "$ROOT" show "HEAD:$relative" | cmp -s - "$file"' "$ACCEPTANCE" \
    && grep -Fq 'org.opencontainers.image.revision' "$ACCEPTANCE" \
    && grep -Fq 'io.5gpn.mihomo.sha256' "$ACCEPTANCE" \
+   && grep -Fq '5gpn-container-runtime-v2' "$ACCEPTANCE" \
+   && grep -Fq '/opt/5gpn/ui' "$ACCEPTANCE" \
+   && grep -Fq 'review_contract:7' "$ROOT/tests/docker/extension-worker-probe.sh" \
    && [[ "$(grep -Fc 'assert_container_boundary' "$ACCEPTANCE")" -ge 3 ]] \
    && grep -Fq 'tests/docker' "$ACCEPTANCE" \
    && ! grep -Eq 'FIVEGPN_(EXTENSION|WORKER_OOM|CERT_HOT_RELOAD|RECREATE)_PROBE' "$ACCEPTANCE" \

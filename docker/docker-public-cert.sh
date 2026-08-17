@@ -15,7 +15,8 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 HOME=/nonexistent
 TMPDIR=/tmp
-export HOME TMPDIR
+FIVEGPN_RUNTIME=container
+export HOME TMPDIR FIVEGPN_RUNTIME
 CURRENT_GID="$(id -g)"
 EXPECTED_UID=10001
 EXPECTED_GID=10001
@@ -30,22 +31,27 @@ LE_WORK_ROOT=/etc/5gpn/letsencrypt/work
 LE_LOG_ROOT=/etc/5gpn/letsencrypt/log
 CERT_ROOT=/etc/5gpn/cert
 UI_DIR=/opt/5gpn/ui
+UI_SOURCE=/usr/share/5gpn/ui
+COMPONENT_MANIFEST=/usr/share/5gpn/components.env
+UI_GENERATION_HELPER=/opt/5gpn/scripts/ui-generation.sh
+PUBLICATION_FS_HELPER=/opt/5gpn/scripts/publication-fs.sh
+CERT_ROLE_HELPER=/opt/5gpn/scripts/cert-role-ctl.sh
 IOSGEN=/opt/5gpn/scripts/gen-ios-profile.sh
 LOCK_FILE=/run/5gpn/cert-renew.lock
 LE_PRODUCTION_SERVER=https://acme-v02.api.letsencrypt.org/directory
 RENEW_BEFORE_SECONDS=$((30 * 86400))
 CF_PROPAGATION_SECONDS=30
-CERT_ROOT_MARKER=.5gpn-docker-cert-root-owned
-CERT_ROOT_MARKER_VALUE=5gpn-docker-cert-root-v1
-CERT_ROLE_MARKER=.5gpn-docker-cert-role-owned
-CERT_ROLE_VALUE_PREFIX=5gpn-docker-cert-role-v1
+CERT_ROOT_MARKER=.5gpn-cert-root-owned
+CERT_ROOT_MARKER_VALUE=5gpn-cert-root-v1
+CERT_ROLE_MARKER=.5gpn-cert-role-owned
+CERT_ROLE_VALUE_PREFIX=5gpn-cert-role-v1
 LE_MARKER=.5gpn-docker-letsencrypt-owned
 LE_MARKER_VALUE=5gpn-docker-letsencrypt-v1
 LINEAGE_READY_MARKER=.5gpn-docker-lineage-ready
 LINEAGE_READY_VALUE_PREFIX=5gpn-docker-lineage-ready-v1
 LINEAGE_READY_CANDIDATE=.5gpn-docker-lineage-ready.new
-UI_MARKER=.5gpn-zashboard-owned
-UI_MARKER_VALUE=5gpn-zashboard
+UI_HELPER_LOADED=0
+CERT_ROLE_HELPERS_LOADED=0
 LIVE_GENERATION=""
 declare -a COMPLETE_ARCHIVE_GENERATIONS=()
 
@@ -120,76 +126,6 @@ owned_exact_line_file() {
 	printf '%s\n' "$value" | cmp -s - "$path"
 }
 
-ensure_owned_directory() {
-	local path="$1" mode="$2" parent actual_mode
-	local -a entries=()
-	if [[ ! -e "$path" && ! -L "$path" ]]; then
-		parent="$(dirname -- "$path")"
-        canonical_directory "$parent" \
-            && [[ "$(path_uid "$parent")" == "$EUID" \
-               && "$(path_gid "$parent")" == "$CURRENT_GID" ]] \
-            || return 1
-		mkdir -m "$mode" -- "$path" || return 1
-		fsync_directory "$parent" || return 1
-	fi
-	if owned_directory "$path" "$mode"; then
-		return 0
-	fi
-	# A SIGKILL inside mkdir -m can leave only the umask-restricted 0700
-	# directory. Repair that one empty, same-identity state; never broaden a
-	# populated or otherwise unexpected directory.
-	if [[ "$mode" == 750 ]] && canonical_directory "$path" \
-	   && [[ "$(path_uid "$path")" == "$EUID" \
-	      && "$(path_gid "$path")" == "$CURRENT_GID" ]]; then
-		actual_mode="$(path_mode "$path")"
-		directory_entries "$path" entries || return 1
-		if [[ "$actual_mode" == 700 && "${#entries[@]}" == 0 ]]; then
-			chmod 0750 "$path" || return 1
-			fsync_directory "$path" || return 1
-		fi
-	fi
-	owned_directory "$path" "$mode"
-}
-
-write_marker_if_absent() {
-	local dir="$1" name="$2" value="$3" mode="$4" marker candidate entry tmp parent
-	local -a entries=()
-	marker="$dir/$name"
-	candidate="$dir/${name}.candidate"
-	if [[ ! -e "$marker" && ! -L "$marker" ]]; then
-		directory_entries "$dir" entries || return 1
-		for entry in "${entries[@]}"; do
-			[[ "$entry" == "$candidate" ]] || return 1
-		done
-		if [[ -e "$candidate" || -L "$candidate" ]]; then
-			owned_exact_line_file "$candidate" "$mode" "$value" || return 1
-		else
-			parent="$(dirname -- "$dir")"
-			tmp="$(mktemp "$parent/.5gpn-marker-stage.XXXXXX")" || return 1
-			printf '%s\n' "$value" > "$tmp" \
-				|| { rm -f -- "$tmp"; return 1; }
-			chmod "$mode" "$tmp" || { rm -f -- "$tmp"; return 1; }
-			owned_plain_file "$tmp" "$mode" \
-				|| { rm -f -- "$tmp"; return 1; }
-			fsync_file "$tmp" || { rm -f -- "$tmp"; return 1; }
-			directory_entries "$dir" entries \
-				|| { rm -f -- "$tmp"; return 1; }
-			[[ "${#entries[@]}" == 0 ]] \
-				|| { rm -f -- "$tmp"; return 1; }
-			mv -Tn -- "$tmp" "$candidate" || { rm -f -- "$tmp"; return 1; }
-			[[ ! -e "$tmp" && ! -L "$tmp" ]] \
-				|| { rm -f -- "$tmp"; return 1; }
-			fsync_directory "$dir" || return 1
-		fi
-		owned_exact_line_file "$candidate" "$mode" "$value" || return 1
-		mv -Tn -- "$candidate" "$marker" || return 1
-		[[ ! -e "$candidate" && ! -L "$candidate" ]] || return 1
-		fsync_directory "$dir" || return 1
-	fi
-	[[ ! -e "$candidate" && ! -L "$candidate" ]] \
-		&& owned_exact_line_file "$marker" "$mode" "$value"
-}
-
 valid_domain() {
     local domain="${1:-}"
     [[ ${#domain} -ge 1 && ${#domain} -le 253 \
@@ -261,20 +197,20 @@ ensure_layout() {
         && [[ "$(path_uid /etc/5gpn)" == "$EUID" \
            && "$(path_gid /etc/5gpn)" == "$CURRENT_GID" ]] \
         || { err "The persistent /etc/5gpn root is unsafe or belongs to another identity."; return 1; }
-    ensure_owned_directory "$LE_ROOT" 700 \
-        && write_marker_if_absent "$LE_ROOT" "$LE_MARKER" "$LE_MARKER_VALUE" 600 \
-        && ensure_owned_directory "$LE_WORK_ROOT" 700 \
-        && ensure_owned_directory "$LE_LOG_ROOT" 700 \
+    owned_directory "$LE_ROOT" 700 \
+        && owned_exact_line_file "$LE_ROOT/$LE_MARKER" 600 "$LE_MARKER_VALUE" \
+        && owned_directory "$LE_WORK_ROOT" 700 \
+        && owned_directory "$LE_LOG_ROOT" 700 \
         || { err "The persistent Certbot tree is unsafe."; return 1; }
-    ensure_owned_directory "$CERT_ROOT" 700 \
-        && write_marker_if_absent "$CERT_ROOT" "$CERT_ROOT_MARKER" "$CERT_ROOT_MARKER_VALUE" 600 \
+    owned_directory "$CERT_ROOT" 751 \
+        && owned_exact_line_file "$CERT_ROOT/$CERT_ROOT_MARKER" 644 "$CERT_ROOT_MARKER_VALUE" \
         || { err "The public certificate role root is unsafe."; return 1; }
     local role
     for role in dot console; do
-        ensure_owned_directory "$CERT_ROOT/$role" 750 \
-            && write_marker_if_absent "$CERT_ROOT/$role" "$CERT_ROLE_MARKER" \
-                "${CERT_ROLE_VALUE_PREFIX}:${role}" 600 \
-            && ensure_owned_directory "$CERT_ROOT/$role/generations" 750 \
+        owned_directory "$CERT_ROOT/$role" 750 \
+            && owned_exact_line_file "$CERT_ROOT/$role/$CERT_ROLE_MARKER" 644 \
+                "${CERT_ROLE_VALUE_PREFIX}:${role}" \
+            && owned_directory "$CERT_ROOT/$role/generations" 750 \
             || { err "The ${role} certificate role tree is unsafe."; return 1; }
     done
 }
@@ -624,6 +560,104 @@ recover_live_lineage() {
     repair_live_links_to_generation "$best"
 }
 
+unpublished_partial_lineage_is_safe() {
+    local live="$LE_LIVE_ROOT/$BASE_DOMAIN" archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN"
+    local conf="$LE_RENEWAL_ROOT/$BASE_DOMAIN.conf" entry name stem mode
+    local -a entries=()
+    ! lineage_ready_exists || return 1
+    lineage_set_is_exclusive || return 1
+    if [[ -e "$LE_ROOT/$LINEAGE_READY_CANDIDATE" \
+       || -L "$LE_ROOT/$LINEAGE_READY_CANDIDATE" ]]; then
+        owned_plain_file "$LE_ROOT/$LINEAGE_READY_CANDIDATE" 600 || return 1
+    fi
+    [[ ! -e "$CERT_ROOT/dot/current" && ! -L "$CERT_ROOT/dot/current" \
+       && ! -e "$CERT_ROOT/console/current" && ! -L "$CERT_ROOT/console/current" ]] \
+        || return 1
+    owned_exact_line_file "$LE_ROOT/$LE_MARKER" 600 "$LE_MARKER_VALUE" || return 1
+    if [[ -e "$archive" || -L "$archive" ]]; then
+        canonical_directory "$archive" \
+            && [[ "$(path_uid "$archive")" == "$EUID" \
+               && "$(path_gid "$archive")" == "$CURRENT_GID" ]] || return 1
+        directory_entries "$archive" entries || return 1
+        for entry in "${entries[@]}"; do
+            name="$(basename -- "$entry")"
+            [[ "$name" =~ ^(cert|chain|fullchain|privkey)([1-9][0-9]{0,8})\.pem$ ]] || return 1
+            stem="${BASH_REMATCH[1]}"
+            mode=644
+            [[ "$stem" != privkey ]] || mode=600
+            owned_plain_file "$entry" "$mode" || return 1
+        done
+    fi
+    if [[ -e "$live" || -L "$live" ]]; then
+        canonical_directory "$live" \
+            && [[ "$(path_uid "$live")" == "$EUID" \
+               && "$(path_gid "$live")" == "$CURRENT_GID" ]] || return 1
+        directory_entries "$live" entries || return 1
+        for entry in "${entries[@]}"; do
+            case "$(basename -- "$entry")" in
+                cert.pem|chain.pem|fullchain.pem|privkey.pem|.repair.*)
+                    live_repair_link_safe "$entry" || return 1 ;;
+                *) return 1 ;;
+            esac
+        done
+    fi
+    if [[ -e "$conf" || -L "$conf" ]]; then
+        [[ -f "$conf" && ! -L "$conf" \
+           && "$(path_uid "$conf")" == "$EUID" \
+           && "$(path_gid "$conf")" == "$CURRENT_GID" \
+           && "$(path_nlink "$conf")" == 1 ]] || return 1
+        mode="$(path_mode "$conf")"
+        [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) || return 1
+    fi
+}
+
+ready_lineage_is_recoverable_read_only() {
+    local live="$LE_LIVE_ROOT/$BASE_DOMAIN" archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN"
+    local generation best=0 entry
+    local -a entries=()
+    lineage_ready_safe \
+        && lineage_set_is_exclusive \
+        && renewal_conf_safe \
+        && archive_lineage_safe \
+        || return 1
+    scan_complete_archive_generations || return 1
+    for generation in "${COMPLETE_ARCHIVE_GENERATIONS[@]}"; do
+        (( 10#$generation > best )) && best=$((10#$generation))
+    done
+    (( best > 0 )) || return 1
+    validate_role_pair "$archive/fullchain${best}.pem" "$archive/privkey${best}.pem" 0 \
+        && cert_chain_structurally_trusted "$archive/cert${best}.pem" "$archive/chain${best}.pem" \
+        || return 1
+    if [[ -e "$live" || -L "$live" ]]; then
+        canonical_directory "$live" \
+            && [[ "$(path_uid "$live")" == "$EUID" \
+               && "$(path_gid "$live")" == "$CURRENT_GID" ]] || return 1
+        directory_entries "$live" entries || return 1
+        for entry in "${entries[@]}"; do
+            case "$(basename -- "$entry")" in
+                cert.pem|chain.pem|fullchain.pem|privkey.pem|.repair.*)
+                    live_repair_link_safe "$entry" || return 1 ;;
+                *) return 1 ;;
+            esac
+        done
+    else
+        canonical_directory "$LE_LIVE_ROOT" \
+            && [[ "$(path_uid "$LE_LIVE_ROOT")" == "$EUID" \
+               && "$(path_gid "$LE_LIVE_ROOT")" == "$CURRENT_GID" ]] || return 1
+    fi
+}
+
+preflight_public_certificate_state() {
+    ensure_layout || return 1
+    load_cert_role_helpers || return 1
+    cert_role_ctl_tree_is_recoverable || return 1
+    if lineage_ready_exists; then
+        ready_lineage_is_recoverable_read_only
+    else
+        unpublished_partial_lineage_is_safe
+    fi
+}
+
 reset_unpublished_partial_lineage() {
     local live="$LE_LIVE_ROOT/$BASE_DOMAIN" archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN"
     local conf="$LE_RENEWAL_ROOT/$BASE_DOMAIN.conf" entry name stem mode
@@ -740,271 +774,267 @@ lineage_structure_safe() {
         && cert_chain_structurally_trusted "$live/cert.pem" "$live/chain.pem"
 }
 
-generation_name_safe() {
-    [[ "${1:-}" =~ ^generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]]
-}
-
-generation_safe() {
-    local path="$1" entry name count=0
-    local -a entries=()
-    owned_directory "$path" 750 || return 1
-    directory_entries "$path" entries || return 1
-    for entry in "${entries[@]}"; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            fullchain.pem|privkey.pem) owned_plain_file "$entry" 640 || return 1 ;;
-            *) return 1 ;;
-        esac
-        ((count += 1))
-    done
-    [[ "$count" == 2 ]]
-}
-
-role_tree_safe() {
-    local role="$1" entry name target
-    local root="$CERT_ROOT/$role"
-    local -a entries=()
-    owned_directory "$root" 750 \
-        && write_marker_if_absent "$root" "$CERT_ROLE_MARKER" \
-            "${CERT_ROLE_VALUE_PREFIX}:${role}" 600 \
-        && owned_directory "$root/generations" 750 \
-        || return 1
-    directory_entries "$root" entries || return 1
-    for entry in "${entries[@]}"; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROLE_MARKER"|generations) ;;
-            current)
-                [[ -L "$entry" && "$(path_uid "$entry")" == "$EUID" \
-                   && "$(path_gid "$entry")" == "$CURRENT_GID" ]] || return 1
-                target="$(readlink -- "$entry")" || return 1
-                [[ "$target" == generations/* ]] \
-                    && generation_name_safe "${target#generations/}" \
-                    && generation_safe "$root/$target" || return 1 ;;
-            *) return 1 ;;
-        esac
-    done
-    directory_entries "$root/generations" entries || return 1
-    for entry in "${entries[@]}"; do
-        generation_name_safe "$(basename -- "$entry")" && generation_safe "$entry" || return 1
-    done
-}
-
-role_gc_boundary_safe() {
-    local role="$1"
-    local root="$CERT_ROOT/$role"
-    owned_directory "$root" 750 \
-		&& owned_exact_line_file "$root/$CERT_ROLE_MARKER" 600 \
-			"${CERT_ROLE_VALUE_PREFIX}:${role}" \
-        && owned_directory "$root/generations" 750
-}
-
-purge_generation_candidate() {
-    local role="$1" name="$2" resolved entry entry_name mode current original
-    local root="$CERT_ROOT/$role"
-    local -a entries=()
-    [[ "$name" =~ ^\.new\.[A-Za-z0-9]+$ \
-       || "$name" =~ ^\.delete\.generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] \
-        || return 1
-    role_gc_boundary_safe "$role" || return 1
-    if [[ "$name" == .delete.* ]]; then
-        original="${name#.delete.}"
-        current="$(readlink -- "$root/current" 2>/dev/null || true)"
-        [[ "$current" != "generations/$original" ]] || return 1
-    fi
-    resolved="$(readlink -f -- "$root/generations/$name" 2>/dev/null || true)"
-    [[ "$resolved" == "$root/generations/$name" \
-       && -d "$resolved" && ! -L "$resolved" \
-       && "$(path_uid "$resolved")" == "$EUID" \
-       && "$(path_gid "$resolved")" == "$CURRENT_GID" ]] || return 1
-    mode="$(path_mode "$resolved")"
-    [[ "$mode" == 700 || "$mode" == 750 ]] || return 1
-    directory_entries "$resolved" entries || return 1
-    for entry in "${entries[@]}"; do
-        entry_name="$(basename -- "$entry")"
-        case "$entry_name" in
-            fullchain.pem|privkey.pem)
-                [[ -f "$entry" && ! -L "$entry" \
-                   && "$(path_uid "$entry")" == "$EUID" \
-                   && "$(path_gid "$entry")" == "$CURRENT_GID" \
-                   && "$(path_nlink "$entry")" == 1 \
-                   && "$(path_mode "$entry")" == 640 ]] || return 1 ;;
-            *) return 1 ;;
-        esac
-    done
-    for entry in "${entries[@]}"; do rm -f -- "$entry" || return 1; done
-    rmdir -- "$resolved" || return 1
-    fsync_directory "$root/generations"
-}
-
-remove_generation() {
-    local role="$1" name="$2" current tombstone
-    local root="$CERT_ROOT/$role"
-    if [[ "$name" =~ ^\.new\.[A-Za-z0-9]+$ ]]; then
-        purge_generation_candidate "$role" "$name"
-        return
-    fi
-    generation_name_safe "$name" || return 1
-    role_gc_boundary_safe "$role" || return 1
-    current="$(readlink -- "$root/current" 2>/dev/null || true)"
-    [[ "$current" != "generations/$name" ]] || return 1
-    generation_safe "$root/generations/$name" || return 1
-    tombstone=".delete.${name}"
-    [[ ! -e "$root/generations/$tombstone" \
-       && ! -L "$root/generations/$tombstone" ]] || return 1
-    mv -T -- "$root/generations/$name" "$root/generations/$tombstone" \
-        && fsync_directory "$root/generations" || return 1
-    purge_generation_candidate "$role" "$tombstone"
-}
-
-scrub_role_candidates() {
-    local role="$1" entry name target
-    local root="$CERT_ROOT/$role"
-    local -a entries=()
-    directory_entries "$root" entries || return 1
-    for entry in "${entries[@]}"; do
-        name="$(basename -- "$entry")"
-        case "$name" in
-            "$CERT_ROLE_MARKER"|generations|current) ;;
-            .current.*|.rollback.*)
-                [[ -L "$entry" && "$(path_uid "$entry")" == "$EUID" \
-                   && "$(path_gid "$entry")" == "$CURRENT_GID" ]] || return 1
-                target="$(readlink -- "$entry")" || return 1
-                [[ "$target" == generations/* ]] || return 1
-                generation_name_safe "${target#generations/}" || return 1
-                rm -f -- "$entry" || return 1 ;;
-            *) return 1 ;;
-        esac
-    done
-    directory_entries "$root/generations" entries || return 1
-    for entry in "${entries[@]}"; do
-        name="$(basename -- "$entry")"
-        if [[ "$name" =~ ^\.new\.[A-Za-z0-9]+$ ]]; then
-            remove_generation "$role" "$name" || return 1
-        elif [[ "$name" =~ ^\.delete\.generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]]; then
-            purge_generation_candidate "$role" "$name" || return 1
-        else
-            generation_name_safe "$name" && generation_safe "$entry" || return 1
-        fi
-    done
-}
-
 roles_match_live() {
     local live="$LE_LIVE_ROOT/$BASE_DOMAIN" role
+    cert_role_ctl_validate_current || return 1
     for role in dot console; do
-        role_tree_safe "$role" || return 1
-        [[ -L "$CERT_ROOT/$role/current" ]] || return 1
         cmp -s -- "$live/fullchain.pem" "$CERT_ROOT/$role/current/fullchain.pem" \
             && cmp -s -- "$live/privkey.pem" "$CERT_ROOT/$role/current/privkey.pem" \
             || return 1
     done
 }
 
-rollback_role_links() {
-    local roles_name="$1" old_name="$2" swapped="$3" i role root rollback
-    local -n roles_ref="$roles_name" old_ref="$old_name"
-    for ((i = swapped - 1; i >= 0; i--)); do
-        role="${roles_ref[$i]}"
-        root="$CERT_ROOT/$role"
-        if [[ -n "${old_ref[$i]}" ]]; then
-            rollback="$root/.rollback.${BASHPID}.${RANDOM}"
-            ln -s -- "${old_ref[$i]}" "$rollback" \
-                && mv -Tf -- "$rollback" "$root/current" || return 1
+load_cert_role_helpers() {
+    local helper mode
+    [[ "$CERT_ROLE_HELPERS_LOADED" == 0 ]] || return 0
+    for helper in "$PUBLICATION_FS_HELPER" "$CERT_ROLE_HELPER"; do
+        [[ -f "$helper" && ! -L "$helper" && "$(path_nlink "$helper")" == 1 ]] || return 1
+        if [[ "$helper" == /opt/5gpn/scripts/* ]]; then
+            [[ "$(path_uid "$helper")" == 0 \
+               && "$(path_gid "$helper")" == 0 \
+               && "$(path_mode "$helper")" == 755 ]] || return 1
         else
-            rm -f -- "$root/current" || return 1
+            mode="$(path_mode "$helper")"
+            [[ "${DOCKER_PUBLIC_CERT_LIB_ONLY:-0}" == 1 \
+               && "${BASH_SOURCE[0]}" != "$0" \
+               && "$(path_uid "$helper")" == "$EUID" \
+               && "$(path_gid "$helper")" == "$CURRENT_GID" \
+               && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+            (( (8#$mode & 0022) == 0 )) || return 1
         fi
+        # shellcheck source=/dev/null
+        source "$helper" || return 1
     done
+    [[ "${CERT_ROLE_CTL_API_VERSION:-0}" == 1 ]] \
+        && declare -F cert_role_ctl_publish_pair >/dev/null 2>&1 \
+        || return 1
+    CERT_ROLE_CTL_ROOT="$CERT_ROOT"
+    CERT_ROLE_CTL_CONFIG_MARKER=.5gpn-owned
+    CERT_ROLE_CTL_CONFIG_MARKER_VALUE=5gpn-config
+    CERT_ROLE_CTL_ROOT_MARKER="$CERT_ROOT_MARKER"
+    CERT_ROLE_CTL_ROOT_MARKER_VALUE="$CERT_ROOT_MARKER_VALUE"
+    CERT_ROLE_CTL_ROLE_MARKER="$CERT_ROLE_MARKER"
+    CERT_ROLE_CTL_ROLE_VALUE_PREFIX="$CERT_ROLE_VALUE_PREFIX"
+    CERT_ROLE_CTL_SERVICE_GROUP=fivegpn
+    CERT_ROLE_CTL_SERVICE_GID="$CURRENT_GID"
+    CERT_ROLE_CTL_ALLOW_CREATE=0
+    CERT_ROLE_CTL_ADDITIONAL_GIDS=""
+    if [[ "$CERT_ROOT" == /etc/5gpn/cert ]]; then
+        CERT_ROLE_CTL_ALLOW_TEST_ROOT=0
+        CERT_ROLE_CTL_CONTAINER_MODE=1
+        CERT_ROLE_CTL_STAGE_PARENT=/run/5gpn
+    else
+        [[ "${DOCKER_PUBLIC_CERT_LIB_ONLY:-0}" == 1 \
+           && "${BASH_SOURCE[0]}" != "$0" ]] || return 1
+        case "$CERT_ROOT" in /tmp/5gpn-*|/var/tmp/5gpn-*) ;; *) return 1 ;; esac
+        CERT_ROLE_CTL_ALLOW_TEST_ROOT=1
+        CERT_ROLE_CTL_CONTAINER_MODE=0
+        CERT_ROLE_CTL_STAGE_PARENT="$(dirname -- "$CERT_ROOT")/.cert-role-staging"
+    fi
+    CERT_ROLE_HELPERS_LOADED=1
 }
 
-cleanup_unreferenced_generations() {
-    local role="$1" keep entry name
-    local root="$CERT_ROOT/$role"
-    local -a entries=()
-    keep="$(readlink -- "$root/current")" || return 1
-    keep="${keep#generations/}"
-    generation_name_safe "$keep" || return 1
-    directory_entries "$root/generations" entries || return 1
-    for entry in "${entries[@]}"; do
-        name="$(basename -- "$entry")"
-        [[ "$name" == "$keep" ]] && continue
-        generation_name_safe "$name" || return 1
-        generation_safe "$entry" || return 1
-        remove_generation "$role" "$name" || return 1
-    done
+validate_shared_role_candidate() {
+    local cert="$1" key="$2" role="$3"
+    [[ "$role" == dot || "$role" == console ]] \
+        && validate_role_pair "$cert" "$key" 0
 }
 
 publish_roles() {
-    local live="$LE_LIVE_ROOT/$BASE_DOMAIN" role root stage final link old i swapped=0
-    local -a roles=(dot console) stages=() links=() old_targets=()
+    local live="$LE_LIVE_ROOT/$BASE_DOMAIN"
     _ROLES_CHANGED=0
     validate_live_cert_pair "$live" 0 || return 1
-    for role in "${roles[@]}"; do
-        scrub_role_candidates "$role" || return 1
-        role_tree_safe "$role" || return 1
-    done
-    if roles_match_live; then
+    load_cert_role_helpers || return 1
+    cert_role_ctl_tree_is_recoverable \
+        && cert_role_ctl_repair_recoverable_tree \
+        && cert_role_ctl_scrub_source_snapshots \
+        || { err "The certificate-role tree is not safely recoverable."; return 1; }
+    if roles_match_live && cert_role_ctl_validate_current; then
+        publication_fs_sync_path "$CERT_ROOT/dot" \
+            && publication_fs_sync_path "$CERT_ROOT/console" \
+            && publication_fs_sync_path "$CERT_ROOT" \
+            || { err "Could not repair certificate-role pointer durability."; return 1; }
+        local role
+        for role in dot console; do
+            cert_role_ctl_gc_role "$role" \
+                || warn "Certificate-role stale-generation cleanup needs a later retry."
+        done
         return 0
     fi
-    for role in "${roles[@]}"; do
-        root="$CERT_ROOT/$role"
-        old="$(readlink -- "$root/current" 2>/dev/null || true)"
-        if [[ -n "$old" ]]; then
-            [[ "$old" == generations/* ]] \
-                && generation_name_safe "${old#generations/}" \
-                && generation_safe "$root/$old" || return 1
-        fi
-        old_targets+=("$old")
-        stage="$(mktemp -d "$root/generations/.new.XXXXXX")" || return 1
-        chmod 0750 "$stage" || return 1
-        install -m 0640 "$live/fullchain.pem" "$stage/fullchain.pem" \
-            && install -m 0640 "$live/privkey.pem" "$stage/privkey.pem" \
-            || return 1
-        sync -f "$stage/fullchain.pem" && sync -f "$stage/privkey.pem" || return 1
-        validate_role_pair "$stage/fullchain.pem" "$stage/privkey.pem" 0 || return 1
-        final="$root/generations/generation-$(date -u +%Y%m%dT%H%M%SZ)-${BASHPID}-${RANDOM}"
-        mv -- "$stage" "$final" \
-            && fsync_directory "$root/generations" || return 1
-        stages+=("$final")
-        link="$root/.current.${BASHPID}.${RANDOM}"
-        ln -s -- "generations/$(basename -- "$final")" "$link" || return 1
-        links+=("$link")
-    done
-    for i in "${!roles[@]}"; do
-        role="${roles[$i]}"
-        root="$CERT_ROOT/$role"
-        if ! mv -Tf -- "${links[$i]}" "$root/current"; then
-            rollback_role_links roles old_targets "$swapped" || true
-            return 1
-        fi
-        swapped=$((swapped + 1))
-        sync -f "$root" || return 1
-    done
-    roles_match_live || return 1
-    for role in "${roles[@]}"; do
-        cleanup_unreferenced_generations "$role" || return 1
-    done
+    if ! cert_role_ctl_publish_pair "$live/fullchain.pem" "$live/privkey.pem" \
+            validate_shared_role_candidate; then
+        err "Certificate-role publication state: ${CERT_ROLE_CTL_COMMIT_STATE:-unknown}."
+        [[ -z "${CERT_ROLE_CTL_LAST_ERROR:-}" ]] \
+            || err "Certificate-role publisher: ${CERT_ROLE_CTL_LAST_ERROR}."
+        return 1
+    fi
+    roles_match_live && cert_role_ctl_validate_current || return 1
+    [[ "${CERT_ROLE_CTL_GC_WARNING:-0}" == 0 ]] \
+        || warn "Public certificate roles are live, but post-commit cleanup needs a later retry."
     _ROLES_CHANGED=1
 }
 
-ui_tree_safe() {
-    owned_directory "$UI_DIR" 755 \
-		&& owned_exact_line_file "$UI_DIR/$UI_MARKER" 644 "$UI_MARKER_VALUE"
+component_value() {
+    local key="$1" value count
+    [[ -f "$COMPONENT_MANIFEST" && ! -L "$COMPONENT_MANIFEST" \
+       && "$(path_uid "$COMPONENT_MANIFEST")" == 0 \
+       && "$(path_gid "$COMPONENT_MANIFEST")" == 0 \
+       && "$(path_mode "$COMPONENT_MANIFEST")" == 644 \
+       && "$(path_nlink "$COMPONENT_MANIFEST")" == 1 ]] || return 1
+    count="$(grep -c "^${key}=" "$COMPONENT_MANIFEST" 2>/dev/null || true)"
+    [[ "$count" == 1 ]] || return 1
+    value="$(sed -n "s/^${key}=//p" "$COMPONENT_MANIFEST")"
+    [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    printf '%s' "$value"
+}
+
+load_ui_generation_helper() {
+    [[ "$UI_HELPER_LOADED" == 0 ]] || return 0
+    [[ -f "$UI_GENERATION_HELPER" && ! -L "$UI_GENERATION_HELPER" \
+       && "$(path_uid "$UI_GENERATION_HELPER")" == 0 \
+       && "$(path_gid "$UI_GENERATION_HELPER")" == 0 \
+       && "$(path_mode "$UI_GENERATION_HELPER")" == 755 \
+       && "$(path_nlink "$UI_GENERATION_HELPER")" == 1 ]] || return 1
+    # shellcheck source=/dev/null
+    source "$UI_GENERATION_HELPER" || return 1
+    declare -F ui_generation_stage_tree >/dev/null 2>&1 \
+        && declare -F ui_generation_clone_current >/dev/null 2>&1 \
+        && declare -F ui_generation_publish >/dev/null 2>&1 \
+        || return 1
+    UI_HELPER_LOADED=1
+}
+
+profile_manifest_value() {
+    local manifest="$1" key="$2" count value
+    count="$(grep -c "^${key}=" "$manifest" 2>/dev/null || true)"
+    [[ "$count" == 1 ]] || return 1
+    value="$(sed -n "s/^${key}=//p" "$manifest")"
+    [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    printf '%s' "$value"
+}
+
+profiles_match_live_inputs() {
+    local current="$1" manifest="$1/.5gpn-profile-inputs"
+    local leaf_digest public_key_digest ca_digest
+    [[ -f "$manifest" && ! -L "$manifest" ]] || return 1
+    leaf_digest="$(openssl x509 -in "$CERT_ROOT/dot/current/fullchain.pem" -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')" || return 1
+    public_key_digest="$(openssl x509 -in "$CERT_ROOT/dot/current/fullchain.pem" -pubkey -noout 2>/dev/null \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')" || return 1
+    ca_digest="$(openssl x509 -in /etc/5gpn/intercept-ca/root.crt -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')" || return 1
+    [[ "$leaf_digest" =~ ^[0-9a-f]{64}$ \
+       && "$public_key_digest" =~ ^[0-9a-f]{64}$ \
+       && "$ca_digest" =~ ^[0-9a-f]{64}$ \
+       && "$(profile_manifest_value "$manifest" version)" == 1 \
+       && "$(profile_manifest_value "$manifest" dot_signer_leaf_sha256)" == "$leaf_digest" \
+       && "$(profile_manifest_value "$manifest" dot_public_key_sha256)" == "$public_key_digest" \
+       && "$(profile_manifest_value "$manifest" intercept_ca_der_sha256)" == "$ca_digest" \
+       && "$(profile_manifest_value "$manifest" domain)" == "$DOT_DOMAIN" \
+       && "$(profile_manifest_value "$manifest" gateway_ipv4)" == "$GATEWAY_IP" ]]
+}
+
+scrub_profile_stages() {
+    local entry name stage_file stage_name marker_seen=0 marker_exact=0 mode size
+    local -a root_entries=() stage_entries=()
+    directory_entries /run/5gpn root_entries || return 1
+    for entry in "${root_entries[@]}"; do
+        name="$(basename -- "$entry")"
+        [[ "$name" =~ ^\.ios-profile\.[0-9A-Za-z]{6}$ ]] || continue
+        canonical_directory "$entry" \
+            && [[ "$(path_uid "$entry")" == "$EUID" \
+               && "$(path_gid "$entry")" == "$CURRENT_GID" \
+               && "$(path_mode "$entry")" == 700 ]] || return 1
+        directory_entries "$entry" stage_entries || return 1
+        marker_seen=0
+        marker_exact=0
+        for stage_file in "${stage_entries[@]}"; do
+            stage_name="$(basename -- "$stage_file")"
+            case "$stage_name" in
+                .5gpn-profile-stage) marker_seen=1 ;;
+                ios-dot.mobileconfig|ios-dot.mobileconfig.unsigned|ios-dot.mobileconfig.verified|\
+                ios-intercept-ca.mobileconfig|ios-intercept-ca.mobileconfig.unsigned|\
+                ios-intercept-ca.mobileconfig.verified|signing-chain.pem|intercept-ca.der|\
+                .5gpn-profile-inputs|signing-fullchain.pem|signing-privkey.pem|\
+                signing-intercept-ca.crt) ;;
+                *) return 1 ;;
+            esac
+            [[ -f "$stage_file" && ! -L "$stage_file" \
+               && "$(path_uid "$stage_file")" == "$EUID" \
+               && "$(path_gid "$stage_file")" == "$CURRENT_GID" \
+               && "$(path_nlink "$stage_file")" == 1 ]] || return 1
+            mode="$(path_mode "$stage_file")"
+            size="$(path_size "$stage_file")"
+            [[ ( "$mode" == 600 || "$mode" == 644 ) \
+               && "$size" =~ ^[0-9]+$ && "$size" -le 16777216 ]] || return 1
+        done
+        if (( marker_seen == 1 )); then
+            owned_exact_line_file "$entry/.5gpn-profile-stage" 600 5gpn-profile-stage-v1 \
+                && marker_exact=1 || true
+            if (( marker_exact == 0 && ${#stage_entries[@]} != 1 )); then
+                return 1
+            fi
+        elif ((${#stage_entries[@]} != 0)); then
+            return 1
+        fi
+        for stage_file in "${stage_entries[@]}"; do rm -f -- "$stage_file" || return 1; done
+        rmdir -- "$entry" || return 1
+        sync -f /run/5gpn || return 1
+    done
 }
 
 publish_profiles() {
-    local profile profiles_current=1
-    ui_tree_safe || { err "The writable Console publication tree is unsafe."; return 1; }
+    local candidate current version current_version=""
+    load_ui_generation_helper \
+        || { err "The immutable UI generation helper is unavailable."; return 1; }
+    scrub_profile_stages \
+        || { err "Private profile-signing scratch is not safely recoverable."; return 1; }
     [[ -x "$IOSGEN" ]] || { err "The iOS profile generator is unavailable."; return 1; }
-    if [[ "${FORCE_PROFILE_REFRESH:-0}" == 0 && "${_ROLES_CHANGED:-0}" == 0 ]]; then
-        for profile in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
-            owned_plain_file "$UI_DIR/$profile" 644 || profiles_current=0
-        done
-        [[ "$profiles_current" == 1 ]] && return 0
+    version="$(component_value ZASH_VERSION)" \
+        || { err "The image does not identify its pinned Console release."; return 1; }
+    [[ -d "$UI_SOURCE" && ! -L "$UI_SOURCE" \
+       && -f "$UI_SOURCE/index.html" && ! -L "$UI_SOURCE/index.html" ]] \
+        || { err "The image Console source is missing or unsafe."; return 1; }
+    ui_generation_claim_root "$UI_DIR" \
+        && ui_generation_cleanup_orphan_candidates "$UI_DIR" \
+        || { err "The Console generation volume is not safely recoverable."; return 1; }
+
+    if ui_generation_prepare_existing_current "$UI_DIR"; then
+        current="$(ui_generation_current_path "$UI_DIR")" || return 1
+        if [[ -f "$current/.zash_version" && ! -L "$current/.zash_version" ]]; then
+            IFS= read -r current_version < "$current/.zash_version" || return 1
+        fi
     fi
-    bash "$IOSGEN" "$DOT_DOMAIN" "$GATEWAY_IP" "$UI_DIR" || return 1
-    for profile in ios-dot.mobileconfig ios-intercept-ca.mobileconfig; do
-        owned_plain_file "$UI_DIR/$profile" 644 || return 1
-    done
+    if [[ "${FORCE_PROFILE_REFRESH:-0}" == 0 \
+       && "$current_version" == "$version" ]] \
+       && profiles_match_live_inputs "$current"; then
+        sync -f "$current" \
+            && sync -f "$UI_DIR/generations" \
+            && sync -f "$UI_DIR" \
+            || { err "Could not repair Console current-pointer durability."; return 1; }
+        return 0
+    fi
+    if [[ "$current_version" == "$version" ]]; then
+        candidate="$(ui_generation_clone_current "$UI_DIR")" \
+            || { err "Could not clone the current Console generation."; return 1; }
+    else
+        candidate="$(ui_generation_stage_tree "$UI_DIR" "$UI_SOURCE" "$version")" \
+            || { err "Could not stage the pinned Console generation."; return 1; }
+    fi
+    if ! bash "$IOSGEN" "$DOT_DOMAIN" "$GATEWAY_IP" "$candidate"; then
+        ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true
+        return 1
+    fi
+    if ! ui_generation_publish "$UI_DIR" "$candidate"; then
+        err "Console-generation publication state: ${UI_GENERATION_COMMIT_STATE:-unknown}."
+        [[ "${UI_GENERATION_COMMIT_STATE:-not-committed}" == committed* ]] \
+            || ui_generation_cleanup_candidate "$UI_DIR" "$candidate" || true
+        return 1
+    fi
+    [[ "${UI_GENERATION_GC_WARNING:-0}" == 0 ]] \
+        || warn "The new Console generation is active, but stale-generation cleanup needs a later retry."
+    ui_generation_prepare_existing_current "$UI_DIR"
 }
 
 ensure_lock() {
@@ -1063,7 +1093,7 @@ run_certbot_renew() {
 
 bootstrap_public_certificate() {
     local force=0 ready=0
-    FORCE_PROFILE_REFRESH=1
+    FORCE_PROFILE_REFRESH=0
     ensure_layout && credential_safe && lineage_set_is_exclusive \
         || { err "Docker certificate configuration or persistent state is unsafe."; return 1; }
     if lineage_ready_exists; then
@@ -1101,10 +1131,10 @@ bootstrap_public_certificate() {
 renew_public_certificate() {
     local cert="$LE_LIVE_ROOT/$BASE_DOMAIN/fullchain.pem"
     # A prior run may have published a renewed role pair and then failed while
-    # the two-profile transaction retained its last-known-good files. Existence
-    # and mode cannot prove the profiles were signed by the current role, so a
-    # renewal check always retries the bounded atomic profile transaction.
-    FORCE_PROFILE_REFRESH=1
+    # The generation helper validates profile bytes and their bound input
+    # manifest. Unchanged inputs remain byte-stable; any drift stages and signs
+    # one complete replacement generation.
+    FORCE_PROFILE_REFRESH=0
     ensure_layout && credential_safe && lineage_ready_safe && lineage_structure_safe \
         || { err "The single Cloudflare lineage is missing or unsafe."; return 1; }
     if ! openssl x509 -in "$cert" -noout -checkend "$RENEW_BEFORE_SECONDS" >/dev/null 2>&1; then
@@ -1121,10 +1151,10 @@ renew_public_certificate() {
 }
 
 main() {
-    [[ $# == 1 ]] || { err "Usage: $0 bootstrap|renew"; return 2; }
+    [[ $# == 1 ]] || { err "Usage: $0 preflight|bootstrap|renew"; return 2; }
     [[ "$EUID" == "$EXPECTED_UID" && "$CURRENT_GID" == "$EXPECTED_GID" ]] \
         || { err "Docker certificate helpers require fixed UID:GID 10001:10001."; return 1; }
-	for command in certbot openssl flock sha256sum sync find sort cmp; do
+	for command in certbot openssl flock sha256sum sync find sort cmp grep sed; do
         command -v "$command" >/dev/null 2>&1 \
             || { err "Required certificate tool is unavailable: $command"; return 1; }
     done
@@ -1132,9 +1162,10 @@ main() {
         || { err "The fixed Docker bootstrap configuration is missing or invalid."; return 1; }
     ensure_lock || { err "Another certificate operation is running or the lock is unsafe."; return 1; }
     case "$1" in
+        preflight) preflight_public_certificate_state ;;
         bootstrap) bootstrap_public_certificate ;;
         renew) renew_public_certificate ;;
-        *) err "Usage: $0 bootstrap|renew"; return 2 ;;
+        *) err "Usage: $0 preflight|bootstrap|renew"; return 2 ;;
     esac
 }
 

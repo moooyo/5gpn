@@ -13,7 +13,7 @@ probe_error() {
 }
 trap probe_error ERR
 
-[[ "${FIVEGPN_ACCEPTANCE_INTERNAL:-}" == 5gpn-container-acceptance-v1 ]] \
+[[ "${FIVEGPN_ACCEPTANCE_INTERNAL:-}" == 5gpn-container-acceptance-v2 ]] \
     || { echo 'public-certificate-hot-reload.sh is not standalone' >&2; exit 2; }
 [[ "$EUID" == 10001 && "$(id -g)" == 10001 ]] \
     || { echo 'public certificate probe requires fivegpn UID:GID 10001:10001' >&2; exit 1; }

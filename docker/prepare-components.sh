@@ -6,7 +6,9 @@ umask 0022
 export LC_ALL=C
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTALLER="$ROOT/install.sh"
+PINS_ENV="$ROOT/release/pins.env"
+PINS_LIBRARY="$ROOT/release/pins.sh"
+UI_GENERATION_LIBRARY="$ROOT/scripts/ui-generation.sh"
 BUILD_ROOT="$ROOT/docker/build"
 FINAL="$BUILD_ROOT/components"
 MARKER=.5gpn-docker-components
@@ -15,16 +17,6 @@ CA_BUNDLE_URL=https://curl.se/ca/cacert-2026-07-16.pem
 CA_BUNDLE_SHA256=3ff344e30b9b1ed2971044eabb438a08f2e2245ddb5f8ab1a3ad8b63ab4eaf91
 
 fatal() { printf 'error: %s\n' "$*" >&2; exit 1; }
-
-read_pin() {
-    local key="$1" lines value count
-    count="$(grep -cE "^${key}=" "$INSTALLER" || true)"
-    [[ "$count" == 1 ]] || fatal "install.sh must define $key exactly once."
-    lines="$(sed -n "s/^${key}=\"\([^\"]*\)\".*/\\1/p" "$INSTALLER")"
-    value="$(printf '%s\n' "$lines" | sed -n '1p')"
-    [[ -n "$value" ]] || fatal "install.sh has an empty $key pin."
-    printf '%s' "$value"
-}
 
 manifest_value() {
     local key="$1" manifest="$FINAL/manifest.env" value count
@@ -49,7 +41,7 @@ print_labels() {
     printf 'io.5gpn.bootstrap-ca.sha256=%s\n' "$(manifest_value CA_BUNDLE_SHA256)"
 }
 
-for command in awk basename cat chmod cmp cp curl dirname find grep gzip mkdir mktemp mv readlink rm sed sha256sum timeout tr unzip; do
+for command in awk basename cat chmod cmp cp curl dirname find findmnt grep gzip mkdir mktemp mv readlink rm sed sha256sum timeout tr unzip; do
     command -v "$command" >/dev/null 2>&1 || fatal "Required command is missing: $command"
 done
 
@@ -66,14 +58,25 @@ case "${1:-}" in
     "") ;;
     *) fatal "Usage: $0 [--print-labels | --mihomo-binary PATH]" ;;
 esac
-[[ -f "$INSTALLER" && ! -L "$INSTALLER" ]] || fatal "Unsafe or missing install.sh"
+[[ -f "$PINS_ENV" && ! -L "$PINS_ENV" ]] || fatal "Unsafe or missing release/pins.env"
+[[ -f "$PINS_LIBRARY" && ! -L "$PINS_LIBRARY" ]] || fatal "Unsafe or missing release/pins.sh"
+[[ -f "$UI_GENERATION_LIBRARY" && ! -L "$UI_GENERATION_LIBRARY" ]] \
+    || fatal "Unsafe or missing scripts/ui-generation.sh"
+source "$PINS_LIBRARY"
+load_release_pins "$PINS_ENV" || fatal "Could not load the centralized release pins."
+# shellcheck source=/dev/null
+source "$UI_GENERATION_LIBRARY"
+declare -F _ui_generation_source_tree_is_safe >/dev/null 2>&1 \
+    || fatal "The shared UI source validator is unavailable."
 
-MIHOMO_REPO="$(read_pin MIHOMO_REPO)"
-MIHOMO_VERSION="$(read_pin MIHOMO_VERSION)"
-MIHOMO_SHA256="$(read_pin MIHOMO_SHA256)"
-ZASH_REPO="$(read_pin ZASH_REPO)"
-ZASH_VERSION="$(read_pin ZASH_VERSION)"
-ZASH_SHA256="$(read_pin ZASH_SHA256)"
+MIHOMO_URL="$(release_download_url mihomo)" \
+    || fatal "Could not construct the pinned mihomo release URL."
+ZASH_URL="$(release_download_url zashboard)" \
+    || fatal "Could not construct the pinned Zashboard release URL."
+MIHOMO_SHA256="$(release_artifact_sha256 mihomo)" \
+    || fatal "Could not read the pinned mihomo digest."
+ZASH_SHA256="$(release_artifact_sha256 zashboard)" \
+    || fatal "Could not read the pinned Zashboard digest."
 
 [[ "$MIHOMO_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
     || fatal "Invalid MIHOMO_REPO pin: $MIHOMO_REPO"
@@ -138,7 +141,7 @@ mihomo_reports_container_contract() {
     chmod 0600 "$output" || { rm -f -- "$output"; return 1; }
     timeout --signal=KILL 10s "$binary" 5gpn-container-contract > "$output" 2>/dev/null \
         || { rm -f -- "$output"; return 1; }
-    if ! printf '%s\n' '5gpn-container-runtime-v1' | cmp -s - "$output"; then
+    if ! printf '%s\n' '5gpn-container-runtime-v2' | cmp -s - "$output"; then
         rm -f -- "$output"
         return 1
     fi
@@ -172,8 +175,6 @@ archive_paths_safe() {
         || fatal "Zashboard archive contains an unsupported object type."
 }
 
-ZASH_URL="https://github.com/${ZASH_REPO}/releases/download/${ZASH_VERSION}/dist.zip"
-
 printf 'Downloading pinned HTTPS bootstrap CA bundle.\n'
 curl -fsSL --retry 3 --retry-delay 2 --max-time 300 \
     "$CA_BUNDLE_URL" -o "$stage/bootstrap-ca.pem"
@@ -186,7 +187,6 @@ if [[ -n "$mihomo_input" ]]; then
     cp -- "$mihomo_input" "$stage/5gpn-mihomo"
     MIHOMO_SOURCE=development-local
 else
-    MIHOMO_URL="https://github.com/${MIHOMO_REPO}/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
     printf 'Downloading pinned mihomo %s.\n' "$MIHOMO_VERSION"
     curl -fsSL --retry 3 --retry-delay 2 --max-time 600 \
         "$MIHOMO_URL" -o "$stage/mihomo.gz"
@@ -199,7 +199,7 @@ chmod 0755 "$stage/5gpn-mihomo"
 mihomo_reports_exact_version "$stage/5gpn-mihomo" "$MIHOMO_VERSION" \
     || fatal "Prepared mihomo does not report exact version $MIHOMO_VERSION for linux/amd64."
 mihomo_reports_container_contract "$stage/5gpn-mihomo" \
-    || fatal "Prepared mihomo does not implement exact 5gpn-container-runtime-v1 contract."
+    || fatal "Prepared mihomo does not implement exact 5gpn-container-runtime-v2 contract."
 MIHOMO_BINARY_SHA256="$(sha256sum "$stage/5gpn-mihomo" | awk '{print $1}')"
 [[ "$MIHOMO_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || fatal "Could not compute the prepared mihomo binary digest."
@@ -224,8 +224,19 @@ fi
 [[ -f "$ui_source/index.html" && ! -L "$ui_source/index.html" ]] \
     || fatal "Zashboard archive has no index.html at its supported root."
 cp -R -- "$ui_source/." "$stage/ui/"
-printf '%s\n' "$ZASH_VERSION" > "$stage/ui/.zash_version"
-printf '%s\n' '5gpn-zashboard' > "$stage/ui/.5gpn-zashboard-owned"
+for generated_name in .zash_version .zash_primary_files .zash_compat_files \
+                      .5gpn-ui-base-target .5gpn-ui-generation-owned \
+                      .5gpn-profile-inputs ios-dot.mobileconfig \
+                      ios-intercept-ca.mobileconfig .5gpn-zashboard-owned; do
+    [[ ! -e "$stage/ui/$generated_name" && ! -L "$stage/ui/$generated_name" ]] \
+        || fatal "Zashboard archive contains generated deployment metadata: $generated_name"
+done
+[[ -z "$(find "$stage/ui" -mindepth 1 \
+    \( -name '.ios-profile.*' -o -name '.ios-*.new.*' \
+       -o -name '.5gpn-profile-inputs.new.*' \) -print -quit)" ]] \
+    || fatal "Zashboard archive contains transient generation artifacts."
+_ui_generation_source_tree_is_safe "$stage/ui" \
+    || fatal "Zashboard archive failed the shared UI generation source validator."
 find "$stage/ui" -type d -exec chmod 0755 {} +
 find "$stage/ui" -type f -exec chmod 0644 {} +
 rm -rf -- "$stage/zashboard-extracted"
@@ -237,7 +248,7 @@ MIHOMO_REPO=${MIHOMO_REPO}
 MIHOMO_VERSION=${MIHOMO_VERSION}
 MIHOMO_SHA256=${MIHOMO_SHA256}
 MIHOMO_BINARY_SHA256=${MIHOMO_BINARY_SHA256}
-MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v1
+MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v2
 ZASH_REPO=${ZASH_REPO}
 ZASH_VERSION=${ZASH_VERSION}
 ZASH_SHA256=${ZASH_SHA256}

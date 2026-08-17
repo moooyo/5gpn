@@ -1,4 +1,4 @@
-# 5gpn-unit-id: 5gpn-mihomo.service:v2
+# 5gpn-unit-id: 5gpn-mihomo.service:v3
 [Unit]
 Description=5gpn (DNS engine, interception engine, forwarding data plane, control API)
 After=network-online.target 5gpn-intercept-cert.path
@@ -9,7 +9,18 @@ StartLimitAction=none
 
 [Service]
 Type=simple
+# Installed configure never issues a StopUnit followed by a later StartUnit.
+# It asks PID 1 for one fail-on-conflict try-restart job. This root-only
+# pre-start helper acknowledges a private nonce and blocks the start half of
+# that same job while gateway or HTTP-01 publication is in progress. A normal
+# start has no nonce and returns immediately. An operator stop replaces the
+# pending restart job in PID 1, terminates this helper, and remains stopped.
+ExecStartPre=+/opt/5gpn/scripts/configure-runtime-gate.sh wait
+# Keep UI validation in a separate unprivileged invocation while retaining the
+# same TERM-clean operator-stop behavior during the post-release start window.
+ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui
 ExecStart=/opt/5gpn/bin/5gpn-mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo
+TimeoutStartSec=40min
 # mihomo is the complete gateway runtime. Any unexpected exit, including a
 # clean return after a fatal listener ends, must replace the whole process from
 # its atomically persisted state. A deliberate `systemctl stop` is not restarted

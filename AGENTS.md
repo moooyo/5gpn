@@ -73,21 +73,25 @@ plans, design handoffs, and git history are context only.
   Unix user and group are `fivegpn`, the main unit is
   `5gpn-mihomo.service`, and its executable is
   `/opt/5gpn/bin/5gpn-mihomo`. Runtime documents live under
-  `/etc/5gpn/mihomo/5gpn`. Old `gpn-*` accounts, the unprefixed `mihomo`
-  account/unit/binary, and the old `gpn` state directory are legacy migration
-  inputs only; they are never current names or compatibility aliases.
+  `/etc/5gpn/mihomo/5gpn`. Old `gpn-*` accounts, a generic `mihomo` user or
+  group, an unprefixed binary, any retired unit definition, and the old `gpn`
+  state directory are unsupported legacy footprints; they are never current
+  names or compatibility aliases. Installer preflight must reject them before
+  publication using read-only checks. It must not stop, rename, delete,
+  rewrite, adopt, or change permissions on them.
 - Docker delivery is one `linux/amd64` image, one container, and one Compose
   service. `5gpn-mihomo` remains the sole long-running process and PID 1 after
   synchronous bootstrap; do not add a sidecar, init, cron daemon, or supervisor.
-  The fixed `fivegpn` UID/GID owns the delegated container cgroup and is part of
-  the volume ABI. Container mode requires rootful Docker Engine 28+, cgroup v2,
+  The fixed `fivegpn` UID/GID `10001:10001` owns the delegated container cgroup
+  and is part of both persistent-volume ABIs. Container mode requires rootful
+  Docker Engine 28+, cgroup v2,
   the systemd cgroup driver, a private cgroup namespace,
   `writable-cgroups=true`, and the shipped clone3-aware seccomp profile. Do not
   replace that contract with `privileged`, `SYS_ADMIN`, an unconfined seccomp
   profile, a Docker socket, or a host cgroup bind mount. The mandatory real
   worker probe remains fatal before listeners open. Image preparation must
   also require the pinned binary's exact offline
-  `5gpn-container-contract`/`5gpn-container-runtime-v1` handshake; never
+  `5gpn-container-contract`/`5gpn-container-runtime-v2` handshake; never
   publish a Docker image from a core that lacks it.
 - Docker certificate management is Cloudflare DNS-01 only. After the worker
   probe, mihomo may supervise the fixed trusted, short-lived public and
@@ -96,9 +100,24 @@ plans, design handoffs, and git history are context only.
   deliberately lets the `fivegpn` identity read the Cloudflare credential,
   ACME state, and interception CA key. Preserve this explicit weaker owner
   decision without pretending it is the host installation's key separation.
-  Do not add Docker support for HTTP-01 or debug certificates.
+  Do not add Docker support for HTTP-01 or debug certificates. Compose grants a
+  45-second stop window for the complete helper and monolith shutdown path.
+- Docker bootstrap must use the current configuration boundaries rather than
+  reviving the older container schema. Durable `dns.env` has exactly the six
+  current installation-coordinate keys and never contains the controller
+  secret. The secret exists only in operator-owned `config.yaml`; existing
+  runtime documents are validated by the pinned Core's `5gpn-state validate`
+  mode, and the controller projection is validated by
+  owner-scoped `5gpn-config inspect-controller --owner-uid` v2 command. The
+  persistent `fivegpn-data` volume owns `/etc/5gpn`, while the separate
+  persistent `fivegpn-ui` volume owns the complete
+  `/opt/5gpn/ui/current` generation shape. The UI is not tmpfs and is never a
+  flat copied tree. A volume produced by the retired container-runtime-v1
+  schema is rejected unchanged; there is no in-place volume migration. Fresh
+  and reset seeds have no `:5060` product listener.
 - `/etc/5gpn/mihomo/config.yaml` is fully operator-owned. Normal install,
-  reinstall, and `configure` operations preserve a valid existing file. Only
+  current-schema reinstall, and `configure` operations preserve a valid existing
+  file. Only
   explicit reset may replace the complete file wholesale, after
   `5gpn-mihomo -t`, backup, and atomic rename. The root management TUI may make
   one narrower explicit transaction: its bundled `5gpn-nodes` one-shot parser
@@ -122,12 +141,28 @@ plans, design handoffs, and git history are context only.
   are immutable in-memory projections of the current extension document. The
   tunnel and inner dialer consume those projections directly. Do not restore a
   sidecar, runtime-overlay socket, YAML anchors, generated mihomo rule block, or
-  loopback SOCKS hop.
-- The installer does not roll back. A failure before publication leaves the host
-  untouched; a failure during publication leaves it partially installed and says
-  so. Do not reintroduce snapshot/restore/quarantine machinery — its failure
-  amplification (one unrecoverable unit disabling every healthy one) is why it
-  was removed. Keep fail-before-publish checks, the locks, and staging.
+  loopback SOCKS hop. Certificate pending/error or an unavailable fixed client
+  boundary withdraws the complete runtime plan, including typed rules; claimed
+  HTTP(S) capture hosts remain rejected while unrelated traffic returns to the
+  operator rules. Readiness restoration republishes the same projection without
+  a document revision or operator write.
+- `5gpn-interception` capability 7 is also review contract 7; persisted
+  `intercept.json` remains version 6. Installed details and review candidates
+  expose structured, bounded, body-free `ActionReview` entries with one
+  deterministic `review_digest` per action. Fresh install apply, Marketplace
+  update apply, complete reorder, and enable require the exact contract before
+  mutation. Disable treats a missing, null, or zero value as omitted so
+  revocation remains available; nonzero stale and future versions are rejected.
+  Existing current-schema enabled snapshots remain authorized when v7 loads;
+  do not invent an authorization epoch or disable them during upgrade.
+- The installer does not roll back. A failure before project publication leaves
+  5gpn-managed services, accounts, units, and live files untouched; dependency
+  installation may already have changed shared distribution package state and
+  is not rolled back. A failure during publication leaves the host partially
+  installed and says so. Do not reintroduce snapshot/restore/quarantine
+  machinery — its failure amplification (one unrecoverable unit disabling every
+  healthy one) is why it was removed. Keep fail-before-publish checks, the locks,
+  and staging.
 - `console.<base>` is the single public bootstrap and panel SNI. `/ui/*` and its
   iOS profiles are public, while `/5gpn/*` and the ordinary controller routes
   require the mihomo controller secret. Do not restore a separate bootstrap,
@@ -142,7 +177,11 @@ plans, design handoffs, and git history are context only.
   `moooyo/zashboard`, and first-party extension source belongs in
   `moooyo/5gpn-extensions`. The host installer and Docker assembly consume the
   same digest-pinned release artifacts from those repositories; neither builds
-  their source here.
+  their source here. The single authority is `release/pins.env`, parsed through
+  `release/pins.sh`; do not scrape coordinates from `install.sh` or create a
+  Docker-only lock. A shared review-contract change updates the Mihomo and
+  Zashboard tags and SHA-256 pins together in one root-repository commit; do
+  not publish an intentionally mixed Core/Console pair.
 
 ## Shell TUI policy: Gum
 
@@ -190,6 +229,33 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - The project is pre-release: persist and accept only the current configuration
   keys, file schemas, commands, and callback formats. Do not add compatibility
   aliases, schema migrations, or retired-component teardown paths.
+- Installation supports only a fresh host with no 5gpn footprint or a
+  current-schema reinstall. Any retired unit, account, group, binary, state
+  path, environment key, document, certificate role, or mihomo construct is a
+  hard pre-publication error. The installer reports the conflict read-only; the
+  operator must explicitly decommission or rebuild the host outside the
+  installer before starting a fresh installation.
+- A same-named `fivegpn` user or group is not ownership proof on a fresh host.
+  The installer may repair an incompatible current identity only when a safe
+  current ownership marker or the marked current `5gpn-mihomo.service`
+  definition proves provenance, every existing numeric UID/GID is in the
+  system range and exclusive, and a durable reconciliation journal is
+  published before deletion. Preflight only grants in-memory authorization;
+  journal publication and account deletion cannot begin until the declared
+  publication phase. If a crash leaves the user/group absent, a later run may
+  resume only when the current marker/unit provenance and safe journal still
+  agree and no other identity has claimed the recorded IDs; an exact surviving
+  `fivegpn` group may retain its recorded GID. A journal alone is not provenance.
+  Without those conditions the identity is rejected and left unchanged.
+- Existing runtime documents are validated read-only before publication by the
+  staged, digest-pinned Core through its `5gpn-state validate` one-shot mode.
+  The installer supplies the proven current or journaled owner UID explicitly;
+  the Core enforces that owner plus regular-file, mode, link-count, and
+  no-follow metadata. A group-only journal can resume only when all three
+  runtime documents are absent; any present document requires a proven current
+  or journaled UID. The installer must not duplicate the Core's decoder or
+  validation rules for existing documents in shell; rendering a missing
+  document seed remains an installer responsibility.
 - `CERT_MODE` is exactly `cloudflare`, `http-01`, or `debug`. Both production
   modes use one scoped `<base>` Certbot lineage. HTTP-01 requires exact
   console/dot A records, no AAAA, and may stop mihomo only for the bounded
@@ -197,6 +263,13 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
 - Any root recursive deletion must use a canonical, validated path plus a 5gpn
   ownership marker. Refuse `/`, system directories, empty paths, and unowned
   custom directories.
+- The exact non-sensitive fixed roots `/opt/5gpn`, `/etc/5gpn`,
+  `/var/lib/5gpn`, and `/var/lib/5gpn-intercept` may claim a safe populated
+  directory when no marker exists. Canonical-path, metadata, known
+  legacy-footprint, symlink, hardlink, special-entry, and nested-mount checks
+  run before marker publication. An existing invalid or retired marker is never
+  replaced. Certificate roots, the interception CA root, UI trees, and
+  temporary paths remain strict.
 - Debug certificates belong under `/etc/5gpn/debug-cert`, never anywhere below
   `/etc/letsencrypt/live` or `archive`.
 - Third-party tools are prebuilt; no toolchain is installed on the gateway.
@@ -273,6 +346,14 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   and end-to-end headers, potentially including `Cookie` or `Authorization`.
   Reordering also requires review
   because it changes action, egress, and global routing first-match precedence.
+  At review contract 7, render each action from its typed `ActionReview`; never
+  fall back to raw manifest/action JSON or expose manifest, script, JQ, or mock
+  body bytes. Classify added, removed, changed, and reordered actions by action
+  ID, `review_digest`, and sequence. Treat the returned `review_contract` as an
+  untrusted number: actionable review requires exact equality with the local
+  constant, and protected requests send that local constant rather than echoing
+  the server value. A mismatch must hide action cards, block confirmation, and
+  issue no mutation request.
   `/extensions/hosts` owns searchable, per-plugin capture-host and egress-winner
   auditing; do not move plugin management back into Settings.
 - Marketplace discovery lives on the separate top-level `/marketplace` route,
@@ -316,18 +397,26 @@ for t in tests/test_*.sh; do bash "$t"; done
 tests/verify-artifact-pins.sh
 ```
 
-CI also renders the seed and validates it with digest-pinned mihomo. For real
-deployment behavior follow `tests/integration-smoke.md`.
+CI also renders the seed and validates it with digest-pinned mihomo. The same
+downloaded pinned Core must execute `5gpn-state validate --owner-uid` against
+missing, valid, malformed, and unsafe-metadata fixtures; a shell fake is not
+release evidence. For real deployment behavior follow
+`tests/integration-smoke.md`.
 GitHub-hosted CI may build and statically inspect the Docker image but cannot
 prove delegated cgroup behavior. Docker runtime acceptance, including a real
-extension worker and OOM containment, runs only on the Engine 28/cgroup-v2
-`test-env` gate; never replace it with a hosted-runner mock. A release must fail
-closed unless `FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
-`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` match its exact commit and core pin;
-`FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` must also match the reproducibly rebuilt
-candidate. Update those repository variables only after the exact candidate
-passes from a checkout whose Git root, HEAD, and versioned acceptance inputs
-match that commit byte-for-byte.
+extension worker and OOM containment, must run on a disposable Engine 28,
+cgroup-v2 target reached through `test-env`; it is not authorized on the
+working gateway and must never be replaced with a hosted-runner mock. A release
+must fail closed unless `FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
+`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` match its exact commit and current
+pin manifest, and `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` matches the
+reproducibly rebuilt candidate. Update those variables only after the exact
+candidate passes from a checkout whose Git root, HEAD, and versioned acceptance
+inputs match that commit byte-for-byte.
+The currently pinned Core `.32` does not implement container-runtime-v2, and
+the deployment-neutral Console wording has not yet been published and pinned.
+Both are release blockers; do not weaken the handshake or describe the current
+pin pair as a publishable Docker image.
 
 Preserve unrelated dirty-worktree changes. Use `rg` for discovery and
 `apply_patch` for edits. Until a release policy says otherwise, change stale

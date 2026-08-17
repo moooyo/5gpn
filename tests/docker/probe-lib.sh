@@ -2,7 +2,7 @@
 # Shared host-side primitives for the versioned Docker acceptance probes.
 # This file is sourced only by tests/container-acceptance.sh children.
 
-[[ "${FIVEGPN_ACCEPTANCE_INTERNAL:-}" == 5gpn-container-acceptance-v1 ]] || {
+[[ "${FIVEGPN_ACCEPTANCE_INTERNAL:-}" == 5gpn-container-acceptance-v2 ]] || {
     echo 'Docker acceptance probe library is not a standalone command.' >&2
     return 2 2>/dev/null || exit 2
 }
@@ -65,8 +65,8 @@ wait_for_authenticated_capabilities() {
         if payload="$(api_request GET /capabilities 2>/dev/null)" \
            && jq -e '
                 .controllerApi == "1" and
-                .features["5gpn-dns"].version >= 1 and
-                .features["5gpn-interception"].version == 6
+                .features["5gpn-dns"].version == 2 and
+                .features["5gpn-interception"].version == 7
               ' <<<"$payload" >/dev/null; then
             return 0
         fi

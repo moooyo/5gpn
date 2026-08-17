@@ -1,7 +1,7 @@
 # 5gpn current architecture
 
 This document is the normative description of the current 5gpn system. Design
-proposals and archived migration notes are not sources of current behavior.
+proposals and historical notes are not sources of current behavior.
 
 The project is pre-release. There is no compatibility obligation to anything
 described in earlier revisions of this file.
@@ -21,30 +21,102 @@ described in earlier revisions of this file.
 - **This repository** is the host installer and TUI, and the assembly source
   for the Docker image. It contains no runtime, Console, or extension source.
 
-A GitHub Release publishes exactly `5gpn-installer.tar.gz`, `checksums.txt`, and
-`THIRD_PARTY_NOTICES.md`. The archive contains the host installer plus the
-minimal Docker launch set (`compose.yaml`, the seccomp profile, bootstrap
-example, and runbook), but no runtime or Console binary. The same tag also
-publishes `ghcr.io/moooyo/5gpn:<tag>` for `linux/amd64`, and a stable tag
-additionally advances `ghcr.io/moooyo/5gpn:latest`. A beta tag never moves
-`latest`. The image does not rebuild mihomo or zashboard: its build consumes the
-independent release coordinates and SHA-256 pins from the tagged `install.sh`,
-verifies both downloaded artifacts, and copies those exact results into the
-image. It also requires the pinned binary's offline
-`5gpn-container-contract` command to print exactly
-`5gpn-container-runtime-v1`; a stale runtime without the container lifecycle is
-therefore unpublishable even when its ordinary version string is valid. There
-is no second component lock file. Publication writes the exact OCI digest into
-the GitHub release body. A retry reuses only a content-and-label-identical exact
-image and matching draft or immutable release; any drift fails closed. Stable
-`latest` moves only after the GitHub release is immutable, and beta never moves
-it.
+A 5gpn release publishes only `5gpn-installer.tar.gz`, `checksums.txt`, and
+`THIRD_PARTY_NOTICES.md`; the bundle contains installer material only. It does
+not build or republish mihomo or zashboard. The installer fetches those artifacts
+from their own repositories using independent release tags and SHA-256 pins.
+Those coordinates exist once in the bundled `release/pins.env`. A fixed-key
+parser rejects shell syntax and malformed or unapproved values, and constructs
+only HTTPS GitHub release URLs for the three known repositories. The installer,
+CI, and network verifier use that same library; the installed management copy
+retains the manifest and parser under `/opt/5gpn/release`.
+At process start the installer copies the two single-link files into one private
+process-owned snapshot, requires the source identity and digest to remain stable
+across that capture, and executes and parses only the snapshot. It rechecks the
+original pair before any download and at the final publication boundary. After
+that boundary, installed copies are materialized only from the already-bound
+snapshot, so a later checkout edit cannot turn a safe run into a partial one.
+Release packaging stamps `install.sh` with the two snapshot digests as a derived
+generation binding; an installed backend rejects the development sentinel or a
+mixed script/pin generation before it sources the parser.
+It separately stamps the quick-installer digest. Release-bundle execution,
+full reinstall, and channel handoff validate that digest, while unrelated
+status, restart, node, certificate, and uninstall actions do not depend on
+quick-installer health.
+An installed management process also records its own script and pin-pair state;
+after waiting for the install lock it refuses to act if another transaction
+replaced that backend and asks the operator to invoke `5gpn` again.
+The tags remain independently versioned, but a change to their shared
+`5gpn-interception` contract is one release decision: the root repository updates
+and verifies both pins in the same commit. Both artifacts are staged and
+verified before publication, then the binary and Console tree are published
+before the service is restarted into the new pair. The filesystem publications
+are sequential rather than one cross-artifact atomic rename; exact capability
+matching makes a transient or partially published mixed pair fail closed.
+
+The installer archive also carries the tagged Docker launch set: `compose.yaml`,
+the seccomp profile, bootstrap example, and Docker runbook. These are installer
+inputs, not a bundled runtime. The same tag may publish the separate
+`linux/amd64` registry artifact `ghcr.io/moooyo/5gpn:<tag>`; stable may advance
+`latest` only after the GitHub release is immutable, while beta never moves it.
+Image assembly loads the same bound `release/pins.env` through
+`release/pins.sh`, verifies and copies those exact Core and Console artifacts,
+and creates no Docker-only component lock. The Core must additionally answer
+the offline `5gpn-container-contract` command with exactly
+`5gpn-container-runtime-v2`. Publication records the exact OCI digest and may
+reuse an existing exact tag only when image content and the complete label map
+match the candidate; any drift fails closed.
 
 Zashboard remains installable as a PWA, but its worker is network-only. It
 precaches no application files, deletes caches left by older releases when it
 activates, and mihomo serves every `/ui/*` response with `Cache-Control:
 no-store`. An offline control plane cannot operate the gateway; keeping an old
 one available is actively unsafe.
+
+The public static surface is one generation tree at `/opt/5gpn/ui`. That stable
+root contains only its root-owned marker, `generations/`, and a relative
+`current -> generations/generation-*` symlink. Mihomo's `external-ui` is the
+fixed `/opt/5gpn/ui/current`, while `SAFE_PATHS` and the systemd read-only
+boundary cover the stable root. Every generation is a complete root-owned,
+single-link regular tree containing the Console, `.zash_version`, and both
+signed profiles. Install, renewal, and manual profile refresh build or clone an
+unpublished generation under the shared certificate lock, validate and fsync
+it, and change visibility with one `current` rename. A service startup precheck
+validates the complete current tree before mihomo opens listeners.
+Independent public renewal takes the install lock, rejects retained configure
+gate state, then takes the certificate lock. The interception-certificate
+oneshot is deliberately different: the full installer releases the certificate
+lock while retaining the install lock and waits for that oneshot, so it takes
+only the certificate lock and then rejects retained gate state. Configure cannot
+create a gate while that check is in flight because it needs the same
+certificate lock before its runtime-affecting transaction.
+
+One browser may fetch an old `index.html` immediately before a generation
+switch and request its hashed asset immediately afterwards. Each generation
+therefore records `.zash_primary_files`, a root-owned digest manifest of its
+own `assets/` files, and `.zash_compat_files`, a disjoint manifest containing
+only primary assets copied from the immediately previous generation because
+the new dist omitted them. A same asset path with different bytes is rejected.
+Compat files never become primary input for the next generation, so this is a
+one-release old-tab window rather than an accumulating fallback archive.
+
+All top-level bytes come from the new dist. The digest-pinned Console build is
+required to keep its stable old-tab URLs present across that one-release
+window: `apple-touch-icon.png`, `favicon.ico`, `favicon.svg`,
+`favicon-dark.svg`, `icon.svg`, the four `pwa-*` icons named by
+`manifest.webmanifest`, `registerSW.js`, `sw.js`, and `pwa-no-cache.js` when
+the preceding generation exposed them. The manifest must remain valid JSON
+and may name only safe generation-local stable icon paths. Their bytes may
+change with the new generation; this is an explicit stable-URL compatibility
+assumption, not a promise that arbitrary top-level content stays byte-identical.
+After a durable current switch, garbage collection keeps only current and
+previous; GC failure is a warning and never rolls back the committed pointer.
+
+The Docker form uses the same stable-root, generation, manifest, profile, and
+relative-`current` shape in its separate persistent `fivegpn-ui` volume.
+Ownership there belongs to fixed container identity `10001:10001` rather than
+host root, but a flat copied UI tree and the retired UI tmpfs are not supported
+container schemas. `external-ui` remains `/opt/5gpn/ui/current`.
 
 Core and Console self-upgrade are not controller capabilities. Authenticated
 requests to `/upgrade` and `/upgrade/ui` fail with HTTP 403, and the Console
@@ -74,11 +146,25 @@ separation is an explicit owner decision for the simplified Docker form, not an
 accidental security claim.
 
 The only current public certificate roles are `dot` for DoT and `console` for
-the controller, Console, and profiles. A legacy `web` certificate role and the
-old `DNS_WEB_CERT`/`DNS_WEB_KEY` configuration fields are migration inputs only;
-current configuration neither persists nor consumes them. The interception CA
+the controller, Console, and profiles. A `web` certificate role or the retired
+`DNS_WEB_CERT`/`DNS_WEB_KEY` fields are unsupported legacy footprints that make
+installer preflight fail before publication; current configuration neither
+persists nor consumes them. The interception CA
 and constrained leaf are a separate private trust boundary, not another public
 certificate role.
+
+Both role writers use one bundled `cert-role-ctl.sh` over the shared
+`publication-fs.sh` durability and mount-boundary primitives. One immutable
+source snapshot supplies both roles. Each complete generation is synced and
+renamed before its relative `current` pointer is changed, and each pointer
+rename is followed by a fatal role-directory sync. The two pointers are a
+documented sequential publication boundary, not a cross-role atomic rename: a
+failure after the first pointer commits is reported as `committed-partial`, and
+a post-rename sync failure is `committed-undurable`. Neither state is rolled
+back. The next locked run validates the live pointers and repairs forward.
+Garbage collection begins only after both pointers are durable, re-reads the
+live pointer immediately before each deletion, refuses every mount boundary,
+and uses a durable tombstone so an interrupted exact-file unlink is resumable.
 
 The DNS answer determines whether a client connects directly to an origin or
 connects to the gateway. When the gateway address is returned, mihomo sniffs the
@@ -180,7 +266,9 @@ worker when the unit stops. No in-process supervisor is introduced.
 The global drop-in rejection includes the complete systemd 257 `Memory*`,
 `CPU*`, `IO*`, `BlockIO*`, `Tasks*`, `ManagedOOM*`, and `Limit*` resource
 families, their startup/allowed-node variants, `Slice=`/`DisableControllers=`,
-and process scheduling controls. This deliberately includes accounting keys and
+process scheduling controls, service success-status changes, and every global
+`[Unit]` or `[Install]` directive, including aliases, manual start/stop, failure
+actions, conditions, assertions, dependencies, and job timeouts. This deliberately includes accounting keys and
 the older `MemoryLimit`, `CPUShares`, and `BlockIO*` aliases: accepting an
 apparently observational global family member makes the fail-before-publication
 gate dependent on an incomplete hand-maintained key list. Any inherited member
@@ -266,15 +354,18 @@ The supported Compose contract is deliberately narrow:
   admits `clone3` for `CLONE_INTO_CGROUP` while retaining the default denials;
 - an IPv4-only bridge network with explicit public port mappings, a namespaced
   `net.ipv4.ip_unprivileged_port_start=0`, a read-only image root, one
-  `/etc/5gpn` named volume, tmpfs runtime directories, every capability dropped,
-  no new privileges, no Docker socket, and no host cgroup bind mount; and
-- `init: false`, `restart: unless-stopped`, and a 30-second stop grace period.
+  `fivegpn-data` volume at `/etc/5gpn`, one `fivegpn-ui` volume at
+  `/opt/5gpn/ui`, tmpfs runtime directories, every capability dropped, no new
+  privileges, no Docker socket, and no host cgroup bind mount; and
+- `init: false`, `restart: unless-stopped`, and a 45-second stop grace period.
 
 The Docker data-plane listeners use the stable container coordinate
-`0.0.0.0`, which is persisted as `DNS_MIHOMO_LISTEN_IPS`; public and gateway
-addresses remain DNS/deployment identity rather than container-interface bind
-targets. Compose publishes `853/tcp`, `80/tcp`, `443/tcp+udp`,
-`5060/tcp+udp`, `8080/tcp`, and `8443/tcp`. The public 443 mapping terminates at
+`0.0.0.0`; public and gateway addresses remain DNS/deployment identity rather
+than container-interface bind targets. Container bootstrap retains the current
+six-key installation-coordinate boundary and must not add the controller
+secret, fixed listener paths, or certificate paths to `dns.env`. Compose
+publishes `853/tcp`, `80/tcp`, `443/tcp+udp`, `8080/tcp`, and `8443/tcp`.
+There is no product `:5060` listener. The public 443 mapping terminates at
 the Docker-only tunnel socket `0.0.0.0:9443`, whose target remains
 `console.<base>:443`. This translation is necessary because a wildcard
 container `:443` socket would collide with the load-bearing controller at
@@ -292,11 +383,21 @@ still authoritative: a platform that appears to meet the list but cannot
 create the exact bounded sibling hierarchy fails before DoT or the controller
 opens. A GitHub-hosted image build and static container smoke cannot prove this
 runtime property; the release gate includes a real Engine 28/cgroup-v2
-acceptance run on `test-env`.
+acceptance run on a disposable target reached through `test-env`. The working
+gateway's read-only deployment authorization does not authorize container
+recreation, OOM injection, certificate mutation, or other Docker acceptance
+writes.
 The driver verifies that its Git root and `HEAD` are the requested candidate
-and that every versioned installer-pin, Compose, seccomp, driver, and probe
+and that every versioned pin-manifest, Compose, seccomp, driver, and probe
 input is tracked and unchanged at that commit. Supplying a commit label to a
 copied or locally weakened harness is not acceptance evidence.
+
+The durable configuration and UI roots are independently locked for the
+container lifetime. Existing operator YAML is accepted only through the
+owner-scoped `5gpn-config inspect-controller --owner-uid` v2 projection, and
+Core-owned documents only through `5gpn-state validate --owner-uid`. A data
+volume created by container-runtime-v1 is rejected unchanged before bootstrap;
+there is no in-place schema or volume migration.
 
 Docker certificate bootstrap is Cloudflare DNS-01 only. It accepts the
 `cloudflare_api_token` Compose secret, keeps the generated Certbot credential
@@ -369,6 +470,18 @@ Both boundaries share one cache, keyed so they can never share an answer.
 Exactly one credential: mihomo's controller secret, presented as
 `Authorization: Bearer` or as `?token=` on a WebSocket upgrade.
 
+Its only persistent source is the complete operator-owned
+`/etc/5gpn/mihomo/config.yaml`. The installer never mirrors it into `dns.env`
+and never parses or edits its YAML scalar with shell text tools. Root management
+invokes the pinned binary's root-only
+`5gpn-config inspect-controller --config <path>` mode and accepts exactly one
+version-2 JSON object with seven fields: `version`, `raw_revision`, `secret`,
+`external_controller_tls`, `external_ui`, `certificate`, and `private_key`.
+The fixed controller, UI, and TLS paths must match the installation contract.
+Inspection errors do not echo operator data. Each authenticated curl request
+receives its bearer through a fresh inherited descriptor rather than argv, and
+request-body stdin remains available.
+
 The 5gpn bearer token, the one-use log tickets, the zashboard handoff URL, the
 `__Host-5gpn-zash` session cookie and the two-origin `127.0.0.1`/`127.0.0.2`
 split are all deleted. `/5gpn/*` registers through `hub/route.Register`, which
@@ -382,9 +495,10 @@ trusts nothing yet and holds no secret.
 Every `/ui/*` response is nevertheless an isolated browser boundary. Mihomo
 sets a same-origin script policy, denies framing and object embedding, permits
 only the local bundle plus the explicit OpenStreetMap tile origin, and emits
-`nosniff`, `no-referrer`, and a restrictive Permissions Policy. Controller API
-coordinates remain operator-configurable, so the connect policy permits HTTP(S)
-and WS(S) backends without permitting remote script execution.
+`nosniff`, `no-referrer`, and a restrictive Permissions Policy. Zashboard can
+still represent explicit HTTP(S) and WS(S) backends, so the connect policy
+permits those schemes without permitting remote script execution; the managed
+5gpn backend itself remains the fixed console origin.
 
 The installer and the root-only management TUI may display a zashboard setup
 URL. It is not the deleted server-side handoff: it is the ordinary public
@@ -407,10 +521,22 @@ table. Its readiness probe bypasses proxy environment variables and requires
 both public profiles to return HTTP 200 with that exact media type, comparing
 the type case-insensitively and allowing parameters.
 
-Both profile files are published directly beneath `/opt/5gpn/ui`, which is the
-only current profile publication directory, and mihomo serves them beneath
-`/ui/` alongside zashboard. `/opt/5gpn/www`, `WWW_DIR`, and any separate web
-root are legacy migration inputs only and must never receive a current profile.
+Both profile files live in the complete generation selected by
+`/opt/5gpn/ui/current`, and mihomo serves them beneath `/ui/` alongside
+zashboard. `/opt/5gpn/www`, a flat `/opt/5gpn/ui` bundle, `WWW_DIR`, and any
+separate web root are unsupported legacy footprints and must never receive a
+current profile. Profile signing binds the exact DoT certificate generation,
+key bytes, and interception-CA bytes before the first read and rechecks them
+after both CMS payloads are complete. Each signature is verified and unpacked,
+including the requested DoT domain/address and embedded CA digest, before the
+candidate may become current.
+The generation's exact profile-input manifest persists only public evidence:
+the signer leaf and SPKI digests, interception-CA DER digest, requested domain
+and gateway, and both CMS digests. The private-key file digest is used only in
+the in-process anti-drift snapshot and is never written to the public UI tree.
+Scoped renewal compares this manifest with the live lineage, DNS coordinates,
+and interception CA even when the role copies already match, so a failed
+best-effort profile refresh is repaired on the next renewal run.
 
 ## Control surface
 
@@ -421,14 +547,15 @@ showing an operator a status that might be wrong is worse than showing nothing.
 A subsystem whose document failed to load does not advertise itself, so an
 absent panel and an empty one mean different things.
 
-`/5gpn/dns` is read and written whole. The edits are not independent: moving a
-gateway to a new address and changing the upstreams that serve it is one
-decision, and there is no useful state between the two halves of it.
-The listener addresses and certificate paths inside that document are
+`/5gpn/dns` is read and written whole so policy, upstream, subscription, and
+tuning changes remain one revision-protected decision. The gateway address,
+listener addresses, and certificate paths inside that document are
 installation-owned and read-only through this API. A whole-document client
-must round-trip them unchanged. Listener changes require a checked installer
-operation; rejecting them before the durable write prevents a port conflict
-from becoming a persistent systemd restart loop.
+must round-trip them unchanged. Gateway or listener changes require a checked
+installer operation and a complete process restart. Rejecting them before the
+durable write prevents a port conflict from becoming a persistent systemd
+restart loop and prevents a live resolver generation from disagreeing with the
+dynamic gateway guard published at startup.
 
 `/5gpn/interception` is the opposite, and for the same reason. Enabling an
 extension authorizes a capture set, a script set, a storage grant and possibly
@@ -439,9 +566,11 @@ whole document would make those indistinguishable from renaming something, and
 the confirmation an operator gave would not correspond to any particular
 decision. So each is its own write.
 
-Every write quotes the revision it was read at and is refused with `409` if it
-has moved, carrying the current revision back so a client can re-read rather
-than being told only that it lost.
+Each mutable runtime-document API quotes that document's revision and is
+refused with `409` if the same document has moved, carrying its current
+revision back so a client can re-read. This is an API optimistic-concurrency
+contract, not a universal revision shared by installer, YAML, certificate, or
+filesystem transactions.
 
 Fresh install and Marketplace update are each review/apply pairs joined by a
 digest. The digest covers the manifest bytes, every script that will run, and
@@ -478,9 +607,44 @@ monotonic decimal-string `seq`, one process lifetime has an opaque `stream_id`,
 and incremental reads quote both the stream and exclusive `after` cursor. The
 response reports decimal-string oldest/latest/dropped values and an explicit
 reset when a process restart, future cursor, or ring eviction makes the old
-position unusable. Filters never redefine the global sequence. A Console and
-core must still match the feature version exactly; a client must not infer the
-location or log routes from an older version that never mounted their contract.
+position unusable. Filters never redefine the global sequence.
+
+Version 7 retains those surfaces and makes the feature version the exact
+operator review contract. Every installed-extension detail and every install or
+Marketplace review candidate carries `review_contract: 7`. Its `actions` are
+bounded, typed `ActionReview` projections: they identify the action, matchers,
+gate, kind, body mode, timing and body limits, source form, and declarative
+parameters. Script and JQ source text, manifest bytes, and mock response body
+bytes are not returned; code is represented by its SHA-256 and byte count, and
+a mock body by its kind, decoded length, and SHA-256. Each action also carries a
+deterministic `review_digest` over its complete executable declaration,
+including the digests of hidden code or body bytes. That action digest supports
+an exact changed-action identity; the IDs, digests, and returned sequence support
+the Console's added, removed, changed, and reordered presentation. Neither
+replaces the candidate digest, reviewed source, document revision, or apply-time
+refetch.
+
+Four confirmation-bearing writes require the exact current contract before any
+engine mutation: fresh install apply, Marketplace update apply, complete
+execution-order replacement, and `enabled: true`. A missing, older, or future
+value returns HTTP 400 and leaves revision and state unchanged. `enabled: false`
+may omit the field so revocation remains available; null and zero are decoded as
+the same absent value, while an explicitly sent nonzero stale or future version
+is rejected. The Console treats a returned
+contract as an untrusted number, renders no actionable review unless it equals
+its compiled-in constant, and always sends that local constant rather than
+echoing the server's value. A stale tab therefore either stops before issuing a
+write or sends its old constant and is rejected by a newer core.
+
+This control-plane change does not create a new persisted authorization epoch.
+`intercept.json` remains current schema version 6, and an already enabled
+current-schema snapshot remains authorized when a v7 core loads it. The v7 gate
+applies to the next install, Marketplace update, reorder, or enable operation;
+disabling that snapshot remains possible without a contract, while enabling it
+again requires the current contract. A Console and core must still match the
+feature version exactly; a client must not infer any of these routes or fields
+from an older version.
+
 Catalog review resolves its configured source and installed-state projection
 from one committed interception revision. If that document changes while the
 catalog or manifest is being fetched, review returns a revision conflict rather
@@ -493,6 +657,15 @@ may therefore return an authorized `certificate_pending` module; it becomes
 `active` without another configuration write once the root publisher commits a
 matching certificate result. Certificate transitions never advance the
 interception document revision and no derived `active` bit is persisted.
+
+Typed extension `REJECT` and `DIRECT` rules are part of that same derived
+runtime plan, not an independently live rule set. While the certificate is
+pending or in error, or the fixed client boundary is unavailable, both typed
+decisions are withdrawn. A claimed HTTP(S) capture host remains rejected before
+ordinary routing so it cannot bypass the authorization, while unrelated traffic
+receives no extension decision and returns to the operator-owned rule set. Once
+the certificate and boundary are ready again, the typed rules resume from the
+same immutable document without a revision change or another operator write.
 
 All setting values for one extension are one configuration decision and are
 written as a complete typed map. The engine validates and compiles the whole map
@@ -638,8 +811,9 @@ A client that supports protocol fallback can retry over TCP, where plain HTTP
 or TLS/H1/H2 follows the ordinary capture path. An H3-only client fails. The
 guard affects only UDP destination port 443 that reaches the gateway: it is not
 a firewall, does not affect traffic that bypasses the gateway, and does not
-disable ordinary UDP forwarding or QUIC sniffing on other configured ports such
-as the optional `:5060` ingress.
+disable ordinary UDP forwarding or QUIC sniffing on other explicitly
+operator-configured ports. Fresh and reset seeds do not create a `:5060`
+listener or a product-managed ingress module.
 
 ### Mihomo modes and proxy groups
 
@@ -679,16 +853,13 @@ continuing subscription service exists. Provider subscriptions and arbitrary
 group/rule edits remain manual operator YAML changes.
 
 Hot apply has an explicit controller boundary. Listener address, transport,
-and routing-mark changes are startup-only and `/configs` returns `409` instead
-of claiming they became live. With listener topology unchanged, a complete
-controller plan—secret, CORS, TLS material, and UI root—is prepared first and
-then swapped atomically; preparation failure leaves the prior listener usable.
-An empty UI root withdraws the old UI rather than continuing to serve stale
-files. New HTTP requests and TLS handshakes use the new plan; already-established
-TLS and authenticated WebSocket connections end on their normal connection
-lifetime. An unexpected end of the current controller listener is a
-monolith-fatal invariant, while closing a retired generation during a successful
-swap is not.
+routing-mark, managed secret, TLS certificate/private-key, and external-UI
+changes are startup-only and `/configs` returns `409` instead of claiming they
+became live. Other permitted plan changes are prepared before publication and
+do not replace the fixed managed controller projection. New HTTP requests use
+the current plan; already-authenticated WebSocket connections end on their
+normal connection lifetime. An unexpected end of the current controller
+listener is a monolith-fatal invariant.
 
 ## The Telegram control plane
 
@@ -707,8 +878,8 @@ Alerts are transitions, never states, and the bot does not claim to detect the
 gateway's own death: a monitor inside the process cannot report that the process
 stopped, and an operator who read silence as health would be worse off than one
 who knows it means nothing. Retired `DNS_HEARTBEAT_URL` and
-`DNS_HEARTBEAT_INTERVAL` keys are tolerated only while an older `dns.env` is
-rewritten and are not persisted by the current installer. An independent
+`DNS_HEARTBEAT_INTERVAL` keys are unsupported legacy footprints and make
+installer preflight fail before publication. An independent
 monitor must actively probe the gateway from outside the host.
 
 Egress goes through the core's own inner dialer, so reaching `api.telegram.org`
@@ -767,8 +938,8 @@ because every edit there is rebase surface. CI runs `go vet ./5gpn/...` and
 ## State
 
 `5gpn/state` holds every 5gpn document under the mihomo home directory. The
-installed path is `/etc/5gpn/mihomo/5gpn`; `gpn` is retained only as the exact
-legacy source name recognized by the one-time installer migration. Writes
+installed path is `/etc/5gpn/mihomo/5gpn`; no alternate or historical state
+directory name is accepted. Writes
 are temp-file, fsync, rename, fsync-directory; the in-memory pointer is
 published only after the rename, so a reader can never observe a value a crash
 would un-observe. A document that fails to parse refuses to open rather than
@@ -776,9 +947,11 @@ resetting to defaults, which would discard the operator's extensions and policy
 without saying so.
 
 Updates carry the revision they were read at and are refused with
-`ErrRevisionConflict` if it has moved. This is the only concurrency control in
-the system and it exists for one reason: two operators with the same page open
-in two tabs.
+`ErrRevisionConflict` if it has moved. This is each runtime document's API
+optimistic-concurrency boundary: it prevents two operators with the same page
+open in two tabs from silently overwriting one another. Mutexes, atomic file
+publication, installer locks, Nodes file locks, and certificate fences enforce
+their separate ordering and durability contracts.
 
 There are three documents. `dns.json` is the resolver: listeners, gateway
 address, the two upstream groups and their client subnet, the ordered policy,
@@ -810,10 +983,12 @@ optional intercepted HTTP protocol above H1.
 `dns.json` replaced four files — `policy.json`, `upstreams.json`, `ecs.json` and
 the DNS-shaped half of an environment file that systemd read and the runtime
 could not write. Splitting them made every cross-cutting edit two writes with no
-way to name the pair: moving a gateway to a new address and changing the
-upstreams that serve it left a window in which the resolver was configured as
-neither. It also put the one file the console most needed to repair out of its
-reach.
+way to name the pair: a policy revision and the upstream/tuning state it was
+reviewed against could become live in separate generations. It also put the
+files the Console most needed to repair out of its reach. The
+installation-owned gateway remains in this document so resolver answers and the
+startup guard use one validated state generation, but controller writes must
+round-trip it unchanged.
 
 A missing `dns.json` is seeded with the same two subscription rules as the
 pinned core default: ChinaMax domains with `direct` intent and the GFW list with
@@ -821,28 +996,134 @@ pinned core default: ChinaMax domains with `direct` intent and the GFW list with
 monolith's private `dns-rules` state directory. `/etc/5gpn/rules` is never a
 current cache path.
 
-`dns.env` now contains only installation-owned host coordinates: the DoT/debug
-listeners used for a missing-document seed, base/public/gateway/listener
-addresses, certificate mode and email, and the controller coordinates and
-secret. Runtime policy, upstreams, subscription
-state, resolver tuning, statistics, and heartbeat fields are not mirrored
-there. Known retired keys are accepted only so one installer rewrite can drop
-them. Legacy `policy.json`, `upstreams.json`, `ecs.json`, `subscriptions.json`,
-`stats.json`, and `/etc/5gpn/rules` remain root-only migration evidence; the
-monolith neither reads them nor receives write access to them.
+`dns.env` contains exactly six installation inputs: `DNS_BASE_DOMAIN`,
+`DNS_PUBLIC_IP`, `DNS_GATEWAY_IP`, `DNS_MIHOMO_LISTEN_IPS`, `CERT_MODE`, and
+`CERT_EMAIL`. The DoT/debug/origin listeners, managed controller address, UI
+root, and public certificate paths are fixed constants. The controller secret
+belongs only to `config.yaml`; runtime policy, upstreams, subscription state,
+resolver tuning, statistics, and heartbeat fields are not mirrored here.
+Unknown or retired keys—including the wider pre-release environment schema—are
+rejected; the installer never rewrites an older schema into the current one.
+Before Gum or project-root publication, existing bytes undergo read-only root
+metadata, exact-key, grammar, and value validation; after a fixed-root claim,
+the same file is revalidated through the current marker boundary. The installer
+lock is the only concurrent-writer contract for this file: one invocation reads
+a single inode snapshot, binds publication to that revision, and checks it again
+immediately before rename. Manual root edits that do not take the installer lock
+must not run concurrently with install, reinstall, reset, or configure.
+Historical `policy.json`, `upstreams.json`,
+`ecs.json`, `subscriptions.json`, `stats.json`, `/etc/5gpn/rules`, and sidecar
+documents are unsupported legacy footprints. The monolith never reads them,
+and installer preflight reports them without modifying them.
+
+`configure` is an installed-management transaction, not a release reinstall.
+It requires the current owned `dns.env`, operator YAML, existing `dns.json`,
+installed Core, runtime identity, unit, and filesystem boundaries; it never
+downloads artifacts, installs dependencies, claims roots, creates accounts,
+publishes binaries, scripts, units, or Console assets, or seeds a missing
+document. The install lock is acquired before the installed-backend revision
+check. The TUI collects and confirms one complete candidate before a missing
+Cloudflare credential is held only in process memory. It is persisted only
+after both the node-writer and certificate locks are held and certificate
+selection, operator YAML, public DNS, `dns.env`, and `dns.json` pass the final
+recheck. Configure never collects one for an external lineage or valid
+preserved-role recovery. The operator YAML inode,
+metadata, and raw revision remain pinned across that complete TUI interaction;
+a concurrent edit is not adopted. A changing transaction also holds the
+`config.yaml.5gpn-nodes.lock` used by the one-shot node writer. Pre-start Core
+validation and a post-readiness revision check fence runtime activation;
+ordinary active-service updates use systemd `try-restart`, so a concurrent
+operator stop wins. An unchanged candidate writes nothing and does not restart
+mihomo.
+
+Changed fields have deliberately narrow effects. Certificate email changes
+only `dns.env`. A production public-IP change passes the mode-aware public DNS
+gate and changes only `dns.env`; in debug mode it also replaces the debug
+certificate, republishes both roles, refreshes profiles, and restarts. A
+gateway change prepares an unpublished profile generation, performs a
+revision-checked update of only `dns.json.gateway`, updates `dns.env`, then
+atomically publishes that profile generation and restarts; debug mode also reissues
+the certificate because both configured IPs are part of its SAN contract. The
+released controller API intentionally refuses that installation-owned field.
+Every certificate-role publication, gateway CAS, and other runtime-affecting
+configure write quiesces an active Core with one fail-on-conflict systemd
+`TryRestartUnit` job. PID 1 performs the stop half, then the unit's first,
+root-only `ExecStartPre` acknowledges a private configure nonce and blocks the
+start half of that same job while publication is in progress. Configure never
+issues a separate `StopUnit` followed by a later `StartUnit`.
+
+The private record binds the nonce to the exact systemd job ID and object path,
+its root control PID, and the unit invocation. The job remains the same object
+while systemd changes its internal type from try-restart to start. The helper is
+the unit's only privileged-exec-prefixed command; normal starts return from it
+immediately. Its following unprivileged invocation runs the strict UI-current
+validator. TERM is accepted as a clean pre-start exit only when the helper
+proves that PID 1 currently owns this unit's `stop` job; a bare signal fails the
+start and cannot bypass either pre-start check. A direct operator `systemctl
+stop` replaces the pending restart in PID 1, terminates the current helper
+cleanly, and remains inactive. Configure sees
+that the exact job disappeared and never submits a replacement start. An
+initially inactive service receives no configure-owned start job; the nonce
+still prevents a concurrent external start from crossing the publication
+boundary, and cleanup retains inactive state.
+
+A retained gate before its matching release is recoverable only while the exact
+original blocked job, acknowledgement, control PID, and pre-publication
+restoration entitlement all still agree. Recovery releases that job rather than
+creating another one. Once any certificate role, `dns.json`, `dns.env`, or UI
+`current` publication is visible, that entitlement is revoked and a pre-release
+crash keeps the unit inactive. A durable matching release is the activation
+commit: all selected inputs are already visible, so recovery may let only the
+same exact job finish after revalidating the token, ACK, current inputs,
+readiness, final `active/running` state, positive MainPID, zero ControlPID, and
+absence of another systemd job. Failed, timed-out, or deactivating activation is
+cleaned to inactive and reported as failure. Cleanup first atomically changes
+the owned record to a closing state, so a concurrent start cannot publish a
+record-less acknowledgement while subordinate state is removed. An interrupted
+close resumes only while inactive. The latest complete document, writer
+quiescence, and exact blocked job are revalidated before the file CAS. HTTP-01
+configure uses the same outer job and never starts or stops mihomo from inside
+Certbot; certificate roles, the prepared profile, coordinates, and final
+runtime inputs complete before the single activation release. Before any other mutating full-install,
+management, reset, certificate, profile, or uninstall entry can publish files
+or call systemd, it read-only rejects retained named or temporary gate state
+and directs the operator to the installed `5gpn configure` recovery path.
+Read-only status remains available; no alternate entry guesses that a retained
+gate is safe or deletes it as unrelated residue. A
+listener change requires the operator YAML to already match, then updates
+`dns.env` and restarts. Base-domain or certificate-mode changes run the DNS,
+certificate, role, profile, environment, and restart boundaries. Only a
+service that is stably active is restarted. An inactive service remains
+inactive, a stop observed while the TUI is open wins, and a failed or
+transitioning unit rejects configuration instead of being described as an
+operator stop.
 
 `config.yaml` remains fully operator-owned.
+The installer never renders the `dns.json` gateway into that file as an
+`IP-CIDR` rule. At startup the Core derives a dynamic anti-loop guard from the
+installation-owned gateway and applies it only to private 5gpn system and
+extension tunnel carriers. Ordinary client ingress and generic mihomo `INNER`
+traffic are unaffected. A checked gateway change takes effect after the
+required full process restart without rewriting operator rules.
 
-The Docker deployment maps one local named volume at `/etc/5gpn`. That volume
-is the complete persistence boundary for the operator configuration, monolith
-documents, public certificate lineage and role copies, interception CA and leaf,
-and ownership markers. The image root is read-only; `/run/5gpn`, the secured
-bootstrap copy, `/tmp`, `/var/tmp`, and `/opt/5gpn/ui` are tmpfs. A fresh
-container copies the pinned Console into that empty UI tmpfs and may seed
-missing files, but must preserve
-and validate existing operator-owned files under the same atomic-publication
-rules. The fixed numeric `fivegpn` UID/GID is therefore part of the Docker
-volume ABI and may not drift between image tags.
+The Docker deployment maps two local named volumes. `fivegpn-data` at
+`/etc/5gpn` persists operator configuration, monolith documents, public
+certificate lineage and role copies, interception CA and leaf, and ownership
+markers. `fivegpn-ui` at `/opt/5gpn/ui` persists the complete Console/profile
+generation tree. The image root is read-only; `/run/5gpn`, the secured
+bootstrap copy, `/tmp`, and `/var/tmp` are tmpfs. A fresh container publishes
+the pinned Console and profiles as one complete `/opt/5gpn/ui/current`
+generation. It may seed missing current-schema files,
+but the controller secret is written only to operator-owned `config.yaml`,
+never `dns.env`. Before runtime start the pinned Core validates the exact
+controller projection and any existing `dns.json`, `intercept.json`, and
+`bot.json` files through its one-shot modes; container shell code does not carry
+a parallel schema decoder. Existing files are preserved and validated under
+the same metadata and atomic-publication rules. The fixed numeric `fivegpn`
+UID/GID is therefore part of both Docker volume ABIs and may not drift between
+image tags. A container-runtime-v1 data volume, extra `dns.env` keys, a flat UI
+tree, or retired document schemas are unsupported footprints rejected
+unchanged rather than automatic migration inputs.
 
 ## Operator TUI
 
@@ -870,87 +1151,213 @@ against the validated new file. If that also fails,
 the TUI reports the saved-versus-live split and the previous-file backup path;
 it does not roll the edit back automatically.
 
+Public-certificate source state has two independent records. `.provenance`
+names only the source currently selected for the role copies; it is not a
+history of Certbot ownership. `.certbot-ownership` is the deletion and renewal
+authority for exact base-domain lineages. Selecting debug writes
+`debug:none` without erasing that independent ownership record. Returning to
+the same production base may reuse the canonical owned lineage only when the
+ownership record still names that base, the current selection is either that
+same owned production mode or same-base debug, and the live certificate,
+private key, production ACME server, authenticator, credential path, and
+live/archive paths all match the requested mode. No Certbot issuance occurs on
+that path. A mismatched current base, mode, source, or ownership record cannot
+authorize reuse.
+
+A canonical lineage with no matching ownership record remains external. It may
+be selected only through the same strict certificate and renewal fingerprint,
+is copied through the common role publisher, and never gains deletion or
+renewal authority. Because `.provenance` names the source currently copied into
+the roles, an old base or production mode does not block selecting a different
+strictly validated external lineage. External and debug selection do not pause or take over the
+distro Certbot timer; external renewal remains responsible for the canonical
+lineage, while the 5gpn deploy hook updates only the role copies. The
+`missing` state continues to mean a preserved role-copy fallback with renewal
+disabled and is not lineage history. A repaired canonical lineage is classified
+again from its current strict fingerprint and the exact-base ownership record;
+`missing` alone authorizes neither owned nor external renewal.
+Explicit lineage decommission validates the complete owned lineage, first
+withdraws current owned-renewal provenance, then revokes and syncs the
+exact-base ownership entry before invoking Certbot deletion. A crash or
+Certbot failure after either withdrawal leaves a present lineage
+read-only/external and never transfers stale authority to a future same-named
+lineage; neither change is rolled back. An already absent lineage with a
+retained stale entry is marked missing and cleaned without invoking Certbot.
+The installed certificate publication helpers remain present until role,
+debug-certificate, credential, and interception-CA decommission has finished;
+runtime cleanup cannot remove the helpers that prove those deletion boundaries.
+
 Service status is provenance-aware. An inactive 5gpn-owned Certbot timer is an
 error; a debug certificate has no applicable renewal timer; a reused external
 lineage remains externally renewed; and `missing` provenance requires repair.
+Owned status is healthy only when the configured base and mode, current
+provenance, and exact-base ownership record agree. An owned/external mismatch
+is a persistent repair state and never borrows an active timer's healthy mark.
 Each displayed systemd unit is queried at most once per rendered snapshot.
 
-## Upgrading an existing gateway
+## Installation compatibility boundary
 
-A legacy three-process gateway may carry configuration the monolith cannot
-parse: two retired `RUNTIME-OVERLAY,5gpn,*` anchors and an
-`IN-NAME,intercept-egress,REJECT` terminator. The core fails `5gpn-mihomo -t` rather
-than starting with capture silently absent.
+The installer supports exactly two starting states: a fresh host with no 5gpn
+footprint, or a deployment already produced by the current schema. A current
+reinstall uses `5gpn-mihomo.service`, `/opt/5gpn/bin/5gpn-mihomo`, the single
+`fivegpn:fivegpn` identity, `/etc/5gpn/mihomo/5gpn`, the exact current `dns.env`
+key set, and current `dns.json`, `intercept.json`, and `bot.json` schemas. A
+normal channel transition preserves a valid operator-owned `config.yaml` byte
+for byte. Explicit `mihomo-reset` remains a current-schema reset, not a
+conversion mechanism.
 
-`scripts/migrate-to-monolith.sh` removes those three rules. It does not strip
-the `NOT,((IN-NAME,intercept-egress))` qualifiers on the two panel allow rules;
-it rewrites them to `NOT,((IN-TYPE,INNER))`. The qualifier looks vacuous once
-the listener is gone — nothing can arrive on an inbound that does not exist —
-but the rule was never about the listener. It kept extension-borne traffic off
-the gateway's own management plane, and the engine still produces such traffic:
-every upstream it opens goes back through these same rules by inner dialling,
-which is what keeps intercepted traffic inside the operator's routing. That
-traffic arrives as `INNER`, with no inbound name. Stripping the qualifier would
-therefore let a captured extension naming the console reach it — so migrated
-hosts get the same predicate a fresh install seeds.
+Compatibility preflight completes before any managed 5gpn service is stopped,
+managed account or unit is changed, project certificate is issued, or live 5gpn
+file is published. It performs read-only inspection and reports every
+conflicting footprint. It never stops, renames, deletes, rewrites, imports,
+adopts, or changes permissions on legacy state. Host dependency installation is
+a separate pre-publication step and may change distribution package state.
 
-The legacy `intercept-egress` listener and `MODULE-INTERCEPT` node are unused by
-the monolith but harmless, so they are cleanup rather than migration.
+The installer does not independently decode the three Core-owned document
+schemas. After downloading and digest-verifying the pinned Core into staging,
+it first validates the exact controller-inspection v2 projection of the fresh
+seed or existing operator YAML, then runs that binary's `5gpn-state validate`
+one-shot mode against the absolute
+state directory, with `--owner-uid` set to the proven current `fivegpn` UID or
+the old UID recorded by an interrupted reconciliation journal. The command only
+reads `dns.json`, `intercept.json`, and `bot.json`; missing documents are valid
+fresh-seed inputs and are not created. Any present document must be a no-follow
+regular file owned by that UID, mode `0600`, singly linked, and satisfy the exact
+schema implemented by the Core that will be published. A group-only identity
+journal can resume only when all three documents are absent; any present
+document requires a proven current or journaled UID. Validation finishes before
+project-root claims, managed 5gpn account/service changes, or live 5gpn file
+publication. The staged binary is never executed as a service during this
+check. The steady state root is service-owned mode `0711`. A fresh mkdir below
+the setgid mihomo home may be interrupted with the otherwise exact `2711`
+shape; that narrow residue is accepted only as current reconciliation input,
+sealed before mutation, and normalized to `0711` before document publication.
 
-Legacy `DNS_INTERCEPT_CONFIG`, `DNS_WEB_CERT`, `DNS_WEB_KEY`, `WWW_DIR`, and the
-retired resolver/API/tuning keys may be recognized only while an older
-installation is rewritten. The old sidecar config and resolver state are kept
-root-only, while a structurally verified `web` certificate-role tree may remain
-as migration evidence. None is accepted as current configuration or exposed to
-the mihomo service account, and none creates a listener, certificate consumer,
-or profile publication path.
+The exact non-sensitive top-level roots `/opt/5gpn`, `/etc/5gpn`,
+`/var/lib/5gpn`, and `/var/lib/5gpn-intercept` are installation coordinates,
+not content-provenance claims. When one has no ownership marker, the installer
+may claim its existing contents only after canonical-path, top-level metadata,
+known-legacy, symlink, hardlink, special-entry, and nested-mount checks pass. An
+existing invalid or retired marker is refused rather than replaced. Certificate
+roots, the interception CA, the UI tree, and temporary paths keep their stricter
+ownership requirements. Every recursive deletion still revalidates the current
+marker and nested-mount boundary.
 
-The units are handled the same way, and the asymmetry is deliberate: the
-installer publishes only the units this release owns, but keeps removing the
-ones it used to. An orphaned `5gpn-dns.service` on an upgraded host would keep
-restarting against a binary that is gone — or keep `:853` bound against the one
-that is not. The list of retired units is therefore the only record that they
-were ever ours, and dropping an entry from it strands whatever it names on every
-host that has not upgraded yet.
+Unsupported footprints include any definition of generic `mihomo.service` or
+retired `5gpn-dns.service`, `5gpn-intercept.service`,
+`5gpn-intercept-runtime.path`, `5gpn-journal@.service`,
+`5gpn-journal@5gpn-dns.service`, or `5gpn-journal@mihomo.service`; a generic
+`mihomo` user or group; old `gpn-dns`, `gpn-intercept`, or overlay-group
+identities; an unprefixed runtime binary; `/etc/5gpn/mihomo/gpn`,
+`/opt/5gpn/www`, a flat UI tree or operator config naming
+`external-ui: /opt/5gpn/ui`, standalone resolver state, sidecar configuration, or old rule
+caches; retired `dns.env` keys or document schemas; a `web` certificate role;
+and mihomo constructs such as
+`RUNTIME-OVERLAY,5gpn,*`, `runtime-overlay-processor`, `intercept-egress`, or
+`MODULE-INTERCEPT`.
 
-The final naming transition is similarly exact. The current runtime is
-`5gpn-mihomo.service`, executes `/opt/5gpn/bin/5gpn-mihomo`, and runs as the
-single `fivegpn:fivegpn` identity. An old-only
-`/etc/5gpn/mihomo/gpn` directory is renamed on the same filesystem to
-`/etc/5gpn/mihomo/5gpn`; two populated directories fail before either is
-changed. The generic `mihomo.service` and old `mihomo`, `gpn-dns`,
-`gpn-intercept`, and overlay-group identities are removed only with project
-provenance and an exact, idle, numerically exclusive system identity. An owned
-legacy unit or state tree is provenance; so is the closed shape of the
-project-specific `gpn-dns` or `gpn-intercept` account. The generic `mihomo`
-identity additionally requires its owned unit/state evidence or membership in
-the retired `5gpn-overlay-*` groups. An incompatible current `fivegpn` account
-is different: that name is installer-owned, so exclusive numeric IDs are
-retained while the account is recreated non-interactively. Aliased IDs fail
-closed.
+The current `fivegpn` name has a narrower recovery rule and is never adopted by
+name alone. If an existing identity is incompatible, repair is allowed only
+when either a safe current root marker or the marked current
+`5gpn-mihomo.service` definition proves it belongs to this installation. Every
+existing UID and GID must be below the host's normal-user threshold and must be
+exclusive to `fivegpn`. Read-only preflight grants only an in-memory repair
+authorization. After the installer crosses its declared publication boundary
+and before deleting a proven current identity, it durably records the old
+numeric IDs; after an interruption, the next run resumes from that journal,
+recreates the system identity, and reconciles only validated managed roots
+before clearing it. Even when the crash happened
+after account deletion, safe current marker or unit provenance must still be
+present, the current journal must validate, and the recorded system-range IDs
+must remain unclaimed by any other identity; an exact surviving `fivegpn` group
+may retain its recorded GID. The journal is recovery state rather than ownership
+proof. A same-named identity without current provenance, a normal-range ID, an
+alias, shared membership, or an unsafe journal is a hard read-only refusal.
+
+Finding any such footprint is a hard pre-publication error. The operator must
+explicitly decommission or rebuild the host outside the installer and then
+begin a fresh installation. 5gpn provides no in-place legacy migration,
+retired-component teardown, state salvage, schema conversion, or compatibility
+alias.
 
 ## Verification boundary
 
-Changes are tested in proportion to their surface. `go build ./...` and
-`go test -race ./5gpn/...` must be green. `tests/` holds the installer suites,
-which are shell and must be run under Linux against an LF checkout.
+Changes are tested in proportion to their surface. In the mihomo repository,
+`go build ./...` and `go test -race ./5gpn/...` must be green. This root
+repository's `tests/` directory holds the installer suites, which are shell and
+must be run under Linux against an LF checkout.
 
-A real gateway is reachable as `test-env` over OpenSSH. Because it is a working
-gateway, configuration changes are validated against copies rather than in
-place.
+The root release gate downloads the exact digest-pinned Core and invokes its
+`5gpn-state validate --owner-uid` command against missing, valid, malformed,
+wrong-owner, wrong-mode, symlink, and hardlink fixtures. A fake executable in a
+shell unit test checks argument plumbing only and cannot prove that the pinned
+release contains the one-shot mode.
 
-Docker has an additional manual release gate. GitHub-hosted CI may prepare the
-digest-pinned components, build the `linux/amd64` image, inspect its static
-contents, and exercise commands that do not start the gateway. It must not
-claim that this proves cgroup isolation. Before publication, the exact candidate
-is exercised on `test-env` with rootful Docker Engine 28, cgroup v2 and the
-systemd cgroup driver. The acceptance contract verifies the real startup probe,
-an extension worker operation, worker OOM containment, authenticated
-capabilities, certificate hot publication, container recreation, and named-volume
-persistence. Publication additionally fails closed unless repository variables
+Acceptance is split by repository ownership and mutation risk. The root
+[acceptance index](../tests/integration-smoke.md) is routing documentation, not
+one executable mega-checklist. The root repository owns installed artifact
+binding, installer publication, host ownership, systemd and listener policy,
+public UI/profile delivery, certificate helpers, and their cross-repository
+integration.
+
+The root [deployment smoke](../tests/deployment-smoke.md) is strictly read-only.
+It may run on an explicitly designated working gateway, but it performs no
+controller write, installer or management mutation, service signal or restart,
+host-file write, lock occupation, certificate issuance, package action, or
+fault injection. Ordinary DNS and HTTPS probes may populate bounded in-memory
+caches and logs just like client traffic; durable configuration, process
+identity, restart count, and file hashes must remain unchanged.
+
+Installer mutation and recovery/failure injection are separate
+**disposable-only** runbooks:
+[installer acceptance](../tests/acceptance/installer.md) and
+[disruption/recovery acceptance](../tests/acceptance/disruption-recovery.md).
+They are never run on a working gateway. A failure before project publication
+must leave managed state untouched except for separately reported shared
+distribution package effects; a failure after publication begins is accepted
+only as an explicitly reported partial installation, never as an automatic
+rollback claim.
+
+Mihomo-internal runtime behavior is owned by the immutable acceptance documents
+at commit
+[`aba0cfcea5ebeda580ab63e174fd17146c3ef962`](https://github.com/moooyo/mihomo/tree/aba0cfcea5ebeda580ab63e174fd17146c3ef962/acceptance).
+Console rendering and interaction behavior is owned by the immutable zashboard
+runbook at commit
+[`cf3d018ffa20eae0297c434b7a185b0d69f43b66`](https://github.com/moooyo/zashboard/blob/cf3d018ffa20eae0297c434b7a185b0d69f43b66/docs/5gpn-console-acceptance.md).
+That runbook permits some restored controller mutations on an explicitly
+designated current-schema gateway, but root release/acceptance scheduling does
+not inherit that permission. Every zashboard controller mutation dispatched by
+the root acceptance flow is disposable-only; a planned restore does not make a
+write read-only or authorize it on a working gateway.
+The root acceptance runbooks do not duplicate their DNS-engine, worker,
+extension, Marketplace, responsive-layout, or browser-interaction assertions.
+
+Every acceptance run records exact release tags, Git commits, artifact and
+fixture SHA-256 values, host or image identity, timestamps, and skipped checks.
+A branch name, moving tag, unqualified image tag, raw `main` or `beta` URL, or
+extension input without a recorded length and digest is not an acceptance
+input. A real gateway reachable as `test-env` may be used only for the
+read-only deployment class; all mutating and fault-injection work uses a
+disposable target.
+
+Docker adds one release gate without weakening that safety split. Hosted CI may
+prepare the bound components, build the `linux/amd64` image, and inspect static
+contents, but it cannot prove writable cgroup delegation. The exact candidate
+therefore runs on a disposable Engine 28, cgroup-v2 target reached through
+`test-env`, never on the working gateway. That acceptance covers the real
+startup probe, an extension worker operation, worker OOM containment,
+authenticated capability version 7, certificate hot publication, container
+recreation, and persistence across both named volumes. Publication fails
+closed unless
 `FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
 `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` match the exact tag commit and its
-current `install.sh` pin, and `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` matches the
-reproducibly rebuilt candidate image content digest. Those variables are
-updated only after that exact candidate passes on `test-env`. No GitHub-hosted
-fallback may turn a missing or stale real-host result into a pass.
+current `release/pins.env` Core digest, and
+`FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` matches the reproducibly rebuilt image.
+No hosted-runner fallback or historical development result may satisfy these
+coordinates.
+
+The merged root implementation requires runtime-v2, but the currently pinned
+Core `.32` does not provide that handshake. The deployment-neutral Zashboard
+setup wording also remains unpublished and unpinned. Until immutable compatible
+Core and Console releases replace both coordinates in `release/pins.env`, the
+Docker release gate is expected to fail closed.

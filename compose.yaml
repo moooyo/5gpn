@@ -9,8 +9,6 @@ services:
       - "0.0.0.0:80:80/tcp"
       - "0.0.0.0:443:9443/tcp"
       - "0.0.0.0:443:9443/udp"
-      - "0.0.0.0:5060:5060/tcp"
-      - "0.0.0.0:5060:5060/udp"
       - "0.0.0.0:8080:8080/tcp"
       - "0.0.0.0:8443:8443/tcp"
     sysctls:
@@ -30,6 +28,9 @@ services:
       - type: volume
         source: fivegpn-data
         target: /etc/5gpn
+      - type: volume
+        source: fivegpn-ui
+        target: /opt/5gpn/ui
       - type: bind
         source: ${FIVEGPN_BOOTSTRAP_CONFIG:-./docker/bootstrap/config.env}
         target: /run/5gpn-bootstrap-input/config.env
@@ -39,18 +40,19 @@ services:
       - /run/5gpn-bootstrap:uid=10001,gid=10001,mode=0700
       - /tmp:uid=10001,gid=10001,mode=1777
       - /var/tmp:uid=10001,gid=10001,mode=1777
-      - /opt/5gpn/ui:uid=10001,gid=10001,mode=0755
     secrets:
       - source: cloudflare_api_token
         target: cloudflare_api_token
     restart: unless-stopped
     stop_signal: SIGTERM
-    stop_grace_period: 30s
+    stop_grace_period: 45s
     pids_limit: 256
 
 volumes:
   fivegpn-data:
     name: ${FIVEGPN_DATA_VOLUME:-fivegpn-data}
+  fivegpn-ui:
+    name: ${FIVEGPN_UI_VOLUME:-fivegpn-ui}
 
 secrets:
   cloudflare_api_token:

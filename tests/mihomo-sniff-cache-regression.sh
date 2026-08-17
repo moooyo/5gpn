@@ -133,13 +133,12 @@ awk -v cert="$RUNTIME/cert.pem" -v key="$RUNTIME/key.pem" -v listener="$GATEWAY_
     next
   }
   {
-    gsub(/__GATEWAY_IP__/, "10.0.0.1")
     gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
     gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
     gsub(/\/etc\/5gpn\/cert\/console\/current\/fullchain.pem/, cert)
     gsub(/\/etc\/5gpn\/cert\/console\/current\/privkey.pem/, key)
-	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443, 5060\]/) {
-	  gsub(/ports: \[443, 8080, 8443, 5060\]/, "ports: [18443, 8080, 8443, 5060]")
+	if ($0 ~ /TLS:.*ports: \[443, 8080, 8443\]/) {
+	  gsub(/ports: \[443, 8080, 8443\]/, "ports: [18443, 8080, 8443]")
 	}
     print
   }

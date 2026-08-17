@@ -10,18 +10,21 @@ nocheck() { if grep -qE "$2" "$root/$1"; then echo "FAIL: $3 ($1 =~ $2)"; FAIL=1
 check install.sh 'install_mihomo\(\)' 'install_mihomo function exists'
 # The data plane no longer comes from upstream: the maintained fork contains the
 # monolith DNS, interception, and controller integration. What has to stay true
-# is that the source is pinned and auditable — a named repository, an exact
-# version, and a digest — rather than assembled from anything an operator or an
-# environment can influence.
-check install.sh '^MIHOMO_REPO="[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"$' 'mihomo source repository is a pinned literal'
-check install.sh 'github.com/\$\{MIHOMO_REPO\}/releases/download' 'downloads mihomo from the pinned repository'
-check install.sh '^MIHOMO_SHA256="[0-9a-f]{64}"$' 'mihomo artifact is pinned by digest'
-check install.sh 'mihomo-linux-amd64-compatible' 'uses amd64-compatible asset'
-check install.sh 'MIHOMO_VERSION' 'mihomo version pin knob'
+# is that the source is pinned and auditable in the centralized manifest — a
+# named repository, an exact version, an asset template, and a digest — rather
+# than assembled from anything an operator or environment can influence.
+check release/pins.env '^MIHOMO_REPO=moooyo/mihomo$' 'mihomo source repository is a pinned literal'
+check release/pins.env '^MIHOMO_VERSION=v[0-9]+\.[0-9]+\.[0-9]+-monolith\.[0-9]+$' 'mihomo version is an exact monolith tag'
+check release/pins.env '^MIHOMO_ASSET_TEMPLATE=[A-Za-z0-9._+-]*\{version\}[A-Za-z0-9._+{}-]*\.gz$' 'mihomo asset template is pinned'
+check release/pins.env '^MIHOMO_SHA256=[0-9a-f]{64}$' 'mihomo artifact is pinned by digest'
+check install.sh 'release_asset_name mihomo' 'installer resolves the centralized mihomo asset'
+check install.sh 'release_download_url mihomo' 'installer uses the closed mihomo URL builder'
 nocheck install.sh 'install_xray\(\)' 'install_xray removed'
 
 # Task 2: mihomo unit
 check etc/systemd/5gpn-mihomo.service 'ExecStart=/opt/5gpn/bin/5gpn-mihomo -f /etc/5gpn/mihomo/config.yaml -d /etc/5gpn/mihomo' 'project-private 5gpn-mihomo ExecStart'
+check etc/systemd/5gpn-mihomo.service 'ExecStartPre=\+/opt/5gpn/scripts/configure-runtime-gate.sh wait' 'PID1-owned configure restart gate'
+check etc/systemd/5gpn-mihomo.service 'ExecStartPre=/opt/5gpn/scripts/configure-runtime-gate.sh validate-ui' 'current UI generation startup gate'
 check etc/systemd/5gpn-mihomo.service 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX' 'mihomo AF set incl AF_NETLINK (required for QUIC/UDP DIRECT dial)'
 check etc/systemd/5gpn-mihomo.service 'ReadWritePaths=/etc/5gpn/mihomo' 'mihomo writes provider caches'
 check etc/systemd/5gpn-mihomo.service 'Environment=SAFE_PATHS=/etc/5gpn/cert/console' 'mihomo SAFE_PATHS scoped to the controller cert role'
@@ -44,23 +47,22 @@ check install.sh 'name: gateway%s'                       'current gateway listen
 check install.sh 'name: gateway80%s'                     'current gateway HTTP listener name'
 check install.sh 'name: gateway8080%s'                   'alternate HTTP listener name'
 check install.sh 'name: gateway8443%s'                   'alternate HTTPS listener name'
-check install.sh 'name: gateway5060%s'                   'default Speedtest listener name'
 check install.sh 'type: tunnel.*port: 443.*network: \[tcp, udp\]' ':443 tcp+udp listener renderer'
 check install.sh 'target: %s:443'                       'listener renderer hostname target'
 check install.sh 'port: 8080.*network: \[tcp\].*target: %s:8080' ':8080 TCP hostname target renderer'
 check install.sh 'port: 8443.*network: \[tcp\].*target: %s:8443' ':8443 TCP hostname target renderer'
-check install.sh 'port: 5060.*network: \[tcp, udp\].*target: %s:5060' ':5060 TCP/UDP hostname target renderer'
+nocheck install.sh 'gateway5060|port: 5060'              'fresh/reset seed has no implicit :5060 ingress'
 check install.sh 'render_mihomo_listeners "\$MIHOMO_LISTEN_IPS" "\$CONSOLE_DOMAIN"' 'renderer receives the console hostname'
 nocheck "$T" 'proxy:'                                  'NO proxy field on listeners (would bypass rules)'
 check "$T" 'parse-pure-ip: true'                       'sniffer parse-pure-ip'
 check "$T" 'override-destination: true'                'sniffer override-destination'
 check "$T" 'force-domain: \[__CONSOLE_DOMAIN__\]'     'console fallback always forces hostname sniffing'
-check "$T" 'TLS:  \{ ports: \[443, 8080, 8443, 5060\] \}'   'TLS sniffer covers default ingress ports'
-check "$T" 'HTTP: \{ ports: \[80, 8080, 8443, 5060\] \}'    'HTTP sniffer covers default ingress ports'
-check "$T" 'QUIC: \{ ports: \[443, 5060\] \}'               'QUIC sniffer covers default UDP ingress ports'
+check "$T" 'TLS:  \{ ports: \[443, 8080, 8443\] \}'   'TLS sniffer covers default ingress ports'
+check "$T" 'HTTP: \{ ports: \[80, 8080, 8443\] \}'    'HTTP sniffer covers default ingress ports'
+check "$T" 'QUIC: \{ ports: \[443\] \}'               'QUIC sniffer covers the guarded UDP ingress'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8080.*REJECT' 'console cannot expose loopback :8080'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,8443.*REJECT' 'console cannot expose loopback :8443'
-check "$T" 'DOMAIN,__CONSOLE_DOMAIN__.*DST-PORT,5060.*REJECT' 'console cannot expose loopback :5060'
+nocheck "$T" '5060'                                     'seed template has no implicit :5060 contract'
 nocheck "$T" 'rule-providers:'                         'no rule-provider survives the allowlist removal'
 nocheck "$T" 'RULE-SET,[[:space:]]*whitelist'          'no rule reads the retired allowlist provider'
 check "$T" 'DOMAIN,__CONSOLE_DOMAIN__,REJECT'           'fail-closed deny for engine egress naming the console'
@@ -83,8 +85,8 @@ check "$T" 'external-controller-tls: 127\.0\.0\.1:443' 'the controller listens w
 check "$T" 'AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT' 'HTTP3/QUIC UDP 443 block enabled by default'
 # HTTP/3 interception is unsupported. The fixed guard must appear exactly once,
 # below the private-range denies and above the terminal MATCH, so a capable
-# client falls back to TCP. This remains scoped to UDP/443; the seed still
-# permits ordinary UDP and keeps QUIC sniffing on :5060.
+# client falls back to TCP. This remains scoped to UDP/443 and does not disable
+# ordinary UDP on operator-configured ports.
 private_deny_line="$(grep -nF '  - IP-CIDR,169.254.0.0/16,REJECT,no-resolve' "$root/$T" | cut -d: -f1 || true)"
 quic_block_line="$(grep -nF '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" | cut -d: -f1 || true)"
 quic_block_count="$(grep -cFx '  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT' "$root/$T" || true)"
@@ -103,8 +105,7 @@ for rule in \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(NETWORK,UDP)),REJECT' \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,80)),REJECT' \
     'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8080)),REJECT' \
-    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT' \
-    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,5060)),REJECT'; do
+    'AND,((DOMAIN,__CONSOLE_DOMAIN__),(DST-PORT,8443)),REJECT'; do
     reject_line="$(grep -nF "  - $rule" "$root/$T" | cut -d: -f1 || true)"
     route_line="$console_direct_line"
     if [ -z "$reject_line" ] || [ -z "$route_line" ] || [ "$reject_line" -ge "$route_line" ]; then
@@ -113,12 +114,13 @@ for rule in \
 done
 panel_deny_line="$(grep -nF '  - DOMAIN,__CONSOLE_DOMAIN__,REJECT' "$root/$T" | cut -d: -f1 || true)"
 anti_loop_line="$(grep -nF '  - IP-CIDR,__GATEWAY_IP__/32,REJECT,no-resolve' "$root/$T" | cut -d: -f1 || true)"
-if [ "$panel_order_ok" = 1 ] && [ -n "$panel_deny_line" ] && [ -n "$anti_loop_line" ] \
-    && [ "$panel_deny_line" -lt "$anti_loop_line" ]; then
-    echo "ok: panel rejects precede panel routes and anti-loop guards follow them"
+if [ "$panel_order_ok" = 1 ] && [ -n "$panel_deny_line" ] && [ -z "$anti_loop_line" ]; then
+    echo "ok: panel rejects precede panel routes and gateway anti-loop state stays out of operator YAML"
 else
-    echo "FAIL: unsafe panel/anti-loop rule ordering"; FAIL=1
+    echo "FAIL: unsafe panel ordering or static gateway anti-loop rule remains"; FAIL=1
 fi
+nocheck "$T" '__GATEWAY_IP__'                             'gateway is a dynamic core boundary, not a YAML placeholder'
+nocheck install.sh 'SEED_GATEWAY_IP|__GATEWAY_IP__'       'installer does not render gateway state into operator YAML'
 nocheck "$T" '__PROFILE_DOMAIN__'                         'retired profile SNI removed'
 # UP-4 (2026-07-15 policy/mihomo decoupling): the daemon no longer owns ANY
 # region of the mihomo config -- the four >>>5gpn:*/<<<5gpn:* marker comment
@@ -166,17 +168,19 @@ nocheck install.sh '/5gpn/nodes'                       'node management is not e
 nocheck install.sh 'add_allow_ip' 'no allowlist add op'
 nocheck install.sh 'del_allow_ip' 'no allowlist del op'
 nocheck install.sh 'providers/rules/whitelist' 'no live allowlist refresh'
-# Same exemption as in test_installer_safety: retire_mihomo_whitelist names the
-# path in order to delete it. Everything else naming it is a survivor.
-if [[ -n "$(awk '
-    /^retire_mihomo_whitelist\(\)/ { skip = 1 }
-    skip { if ($0 == "}") skip = 0; next }
-    /[/]whitelist[.]txt/ { print }
-' "$root/install.sh")" ]]; then
-    echo "FAIL: installer builds a path to an allowlist file outside the retirement"; FAIL=1
+preflight_free_install="$(mktemp)"
+awk '
+    /^detect_legacy_footprints\(\)/ { skip = 1 }
+    skip && /^kernel_release_supports_extension_workers\(\)/ { skip = 0 }
+    skip { print ""; next }
+    { print }
+' "$root/install.sh" > "$preflight_free_install"
+if grep -Eq 'retire_mihomo_whitelist|/whitelist\.txt' "$preflight_free_install"; then
+    echo "FAIL: allowlist teardown path remains outside read-only preflight"; FAIL=1
 else
-    echo "ok: installer builds no allowlist path outside the retirement"
+    echo "ok: no allowlist teardown path"
 fi
+rm -f -- "$preflight_free_install"
 
 # Task 5: selectable Cloudflare DNS-01 wildcard or HTTP-01 exact-SAN cert.
 check install.sh 'dns-cloudflare' 'Cloudflare mode uses DNS-01'
@@ -201,32 +205,39 @@ nocheck install.sh 'xray\.service|/usr/local/bin/xray' 'no old Xray teardown rem
 
 # Task A4: zashboard dist acquisition (pinned dist.zip download + wiring)
 check install.sh '^install_ui\(\)' 'install_ui function exists'
-# The shape, not the number. What matters is that the pin is one column-zero,
-# double-quoted, uninterpolated literal naming a monolith tag -- not `latest`,
-# not a variable, not something a caller can set. Asserting the exact version
-# instead made every console release edit this file, which is churn that teaches
-# the next person to bump the string without reading what it is for.
-check install.sh '^ZASH_VERSION="v[0-9]+\.[0-9]+\.[0-9]+-monolith\.[0-9]+"' 'ZASH_VERSION is a fixed literal monolith pin'
-nocheck install.sh '^ZASH_VERSION=.*(\$|`|latest)' 'ZASH_VERSION is neither interpolated nor a moving tag'
-check install.sh 'ZASH_REPO="moooyo/zashboard"' 'zashboard comes from our fork'
-check install.sh '\$\{ZASH_REPO\}/releases/download' 'zashboard download URL is parameterised by ZASH_REPO'
+# The centralized data manifest, not install.sh or caller variables, owns the
+# exact Console repository, tag, asset, and digest.
+check release/pins.env '^ZASH_VERSION=v[0-9]+\.[0-9]+\.[0-9]+-monolith\.[0-9]+$' 'ZASH_VERSION is a fixed literal monolith pin'
+nocheck release/pins.env '^ZASH_VERSION=.*(\$|`|latest)' 'ZASH_VERSION is neither interpolated nor a moving tag'
+check release/pins.env '^ZASH_REPO=moooyo/zashboard$' 'zashboard comes from our fork'
+check release/pins.env '^ZASH_ASSET_TEMPLATE=[A-Za-z0-9][A-Za-z0-9._+-]*\.zip$' 'zashboard asset is pinned in the manifest'
+check install.sh 'release_download_url zashboard' 'zashboard uses the closed release URL builder'
 nocheck install.sh 'Zephyruso/zashboard/releases/download' 'no hardcoded upstream zashboard download remains'
-# The bundle must be on disk before install_units starts the service: the unit
-# names UI_DIR in ReadOnlyPaths with no `-` prefix, so an unpublished directory
-# is not a missing panel, it is a unit that cannot enter its namespace.
-if grep -A1 -E '^\s*install_ui(\s*\|\| return 1)?\s*$' "$root/install.sh" | grep -q 'install_units'; then
-    echo "ok: full_install publishes the UI immediately before install_units"
+# The helper is installed with the unit, while the complete UI generation is
+# switched only after certificate roles and the interception CA are ready and
+# before runtime startup. ExecStartPre validates current before listeners open.
+full_install_body="$(sed -n '/^full_install()/,/^}/p' "$root/install.sh")"
+files_line="$(grep -n '^[[:space:]]*install_files$' <<<"$full_install_body" | cut -d: -f1)"
+units_line="$(grep -n '^[[:space:]]*install_units$' <<<"$full_install_body" | cut -d: -f1)"
+ui_line="$(grep -n '^[[:space:]]*install_ui$' <<<"$full_install_body" | cut -d: -f1)"
+profile_line="$(grep -n '^[[:space:]]*setup_ios_profile$' <<<"$full_install_body" | cut -d: -f1)"
+start_line="$(grep -n '^[[:space:]]*start_services_with_cert_lock_handoff$' <<<"$full_install_body" | cut -d: -f1)"
+if [[ -n "$files_line$units_line$ui_line$profile_line$start_line" \
+   && "$files_line" -lt "$units_line" && "$units_line" -lt "$ui_line" \
+   && "$ui_line" -lt "$profile_line" && "$profile_line" -lt "$start_line" ]]; then
+    echo "ok: helper/unit installation precedes one complete pre-start UI switch"
 else
-    echo "FAIL: full_install publishes the UI immediately before install_units"; FAIL=1
+    echo "FAIL: full_install UI generation ordering is unsafe"; FAIL=1
 fi
 # UI cleanup is marker-gated; raw rm of the published path is banned.
 check install.sh 'claim_ui_dir\(\)' 'UI ownership marker claim exists'
 check install.sh 'remove_ui_dir\(\)' 'UI marker-gated removal exists'
 nocheck install.sh 'rm -rf "\$UI_DIR"' 'no raw recursive deletion of UI_DIR'
-# The role->account mapping must exist exactly once. It used to be two case
-# statements -- one in the writer, one in the validator -- so moving DoT into the
-# mihomo process changed one of them and produced a tree the other rejected.
-check install.sh '^cert_role_group\(\)' 'certificate role ownership has one definition'
+# The role->account mapping must exist exactly once in the shared role core. It
+# used to be separate writer and validator case statements, so moving DoT into
+# the mihomo process produced a tree that the other side rejected.
+check scripts/cert-role-ctl.sh '^cert_role_ctl_group_name\(\)' 'certificate role ownership has one definition'
+nocheck install.sh '^cert_role_group\(\)' 'installer has no second certificate role mapping'
 nocheck install.sh 'dot\|web\) group=' 'no second role->account mapping remains'
 # Every `5gpn-mihomo -t` the installer runs must see the SAFE_PATHS the unit grants.
 # The seed names paths outside its own home -- the certificates and the UI
@@ -261,17 +272,10 @@ nocheck install.sh 'secondaryPath=/proxy' 'zashboard #/setup deep-link NOT hardc
 #
 # Two shapes are swept, chosen so the assertions that assert ABSENCE do not
 # match themselves: a redirection that creates an allowlist file, and an actual
-# rule line reading the retired provider. Prose about the removal, and the
-# migration that performs it, name the string without being either shape.
-#
-# test_installer_safety.sh is exempt: it creates one on purpose, to prove
-# retire_mihomo_whitelist deletes it. That is the same kind of exemption the
-# zash sweep gives the migration -- the one caller allowed to name a thing is
-# the one whose job is to get rid of it.
+# rule line reading the retired provider.
 creators="$(grep -rn '> *"[^"]*whitelist\.txt"' \
     --include='*.sh' --include='*.yml' --include='*.tmpl' \
-    "$root/install.sh" "$root/scripts" "$root/etc" "$root/tests" "$root/.github" 2>/dev/null \
-    | grep -v '/tests/test_installer_safety.sh' || true)"
+    "$root/install.sh" "$root/scripts" "$root/etc" "$root/tests" "$root/.github" 2>/dev/null || true)"
 if [[ -n "$creators" ]]; then
     printf '%s\n' "$creators" >&2
     echo "FAIL: something still creates an allowlist file"; FAIL=1
