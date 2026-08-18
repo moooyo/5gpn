@@ -89,7 +89,7 @@ non-fatal and the installer falls back to plain output.
 
 | Component | Exact release | License evidence | Verified Linux archive digests |
 |---|---|---|---|
-| [Charmbracelet Gum](https://github.com/charmbracelet/gum/tree/v0.17.0) | `v0.17.0`; `gum_0.17.0_Linux_x86_64.tar.gz`, `gum_0.17.0_Linux_arm64.tar.gz`, and `gum_0.17.0_Linux_armv7.tar.gz` | MIT, Copyright (c) 2022-2024 Charmbracelet, Inc; see [`LICENSE`](https://github.com/charmbracelet/gum/blob/v0.17.0/LICENSE) | `x86_64`: `69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb`; `arm64`: `b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c`; `armv7`: `25711c2fbc6887cde79ed586972834121a04955968808dd688381ac50ab2` |
+| [Charmbracelet Gum](https://github.com/charmbracelet/gum/tree/v0.17.0) | `v0.17.0`; `gum_0.17.0_Linux_x86_64.tar.gz`, `gum_0.17.0_Linux_arm64.tar.gz`, and `gum_0.17.0_Linux_armv7.tar.gz` | MIT, Copyright (c) 2022-2024 Charmbracelet, Inc; see [`LICENSE`](https://github.com/charmbracelet/gum/blob/v0.17.0/LICENSE) | `x86_64`: `69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb`; `arm64`: `b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c`; `armv7`: `25711c2fbc6887cde79ed586972834121a04955968808dd688c688381ac50ab2` |
 
 The verified executable is installed as `/opt/5gpn/bin/gum` on the host. It is
 build infrastructure and is not copied into the runtime image.
