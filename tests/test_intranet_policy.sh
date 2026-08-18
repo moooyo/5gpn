@@ -236,10 +236,14 @@ grep -Fq 'ALLOW_UNSIGNED_PROFILE' "$IOSGEN" \
     && fail "gen-ios-profile.sh: caller environment can still allow unsigned profiles"
 grep -Fq 'Refusing to serve an UNSIGNED .mobileconfig' "$IOSGEN" \
     || fail "gen-ios-profile.sh: refusing an unsigned profile must exit non-zero"
-grep -Fq 'stage_dir="$(mktemp -d "${OUTPUT_DIR}/.ios-profile.XXXXXX")"' "$IOSGEN" \
-    || fail "gen-ios-profile.sh: profiles are not staged privately on the destination filesystem"
-grep -Fq 'mv -Tf -- "$staged_profile" "$profile_path"' "$IOSGEN" \
-    && grep -Fq 'mv -Tf -- "$staged_intercept_profile" "$intercept_profile_path"' "$IOSGEN" \
+grep -Fq 'profile_stage_parent=/run/5gpn' "$IOSGEN" \
+    && grep -Fq 'profile_stage_parent="$OUTPUT_DIR"' "$IOSGEN" \
+    && grep -Fq 'stage_dir="$(mktemp -d "${profile_stage_parent}/.ios-profile.XXXXXX")"' "$IOSGEN" \
+    || fail "gen-ios-profile.sh: private signing material is not isolated in container tmpfs"
+grep -Fq 'install -m 0644 -- "$staged_profile" "$profile_publish_candidate"' "$IOSGEN" \
+    && grep -Fq 'mv -Tf -- "$profile_publish_candidate" "$profile_path"' "$IOSGEN" \
+    && grep -Fq 'install -m 0644 -- "$staged_intercept_profile" "$intercept_publish_candidate"' "$IOSGEN" \
+    && grep -Fq 'mv -Tf -- "$intercept_publish_candidate" "$intercept_profile_path"' "$IOSGEN" \
     || fail "gen-ios-profile.sh: signed profiles are not placed in the unpublished candidate"
 grep -Fq 'dot_public_key_sha256=' "$IOSGEN" \
     && ! grep -Fq 'dot_private_key_sha256=' "$IOSGEN" \
