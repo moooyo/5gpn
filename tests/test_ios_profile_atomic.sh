@@ -357,8 +357,10 @@ cat > "$MOCK_BIN/mv" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 for arg in "$@"; do
-    [[ "${FAIL_DOT_MOVE:-0}" == 1 && "$arg" == */.ios-profile.*/ios-dot.mobileconfig ]] && exit 1
-    [[ "${FAIL_INTERCEPT_MOVE:-0}" == 1 && "$arg" == */.ios-profile.*/ios-intercept-ca.mobileconfig ]] && exit 1
+    [[ "${FAIL_DOT_MOVE:-0}" == 1 \
+       && "$arg" == */generations/.candidate-generation-*/ios-dot.mobileconfig ]] && exit 1
+    [[ "${FAIL_INTERCEPT_MOVE:-0}" == 1 \
+       && "$arg" == */generations/.candidate-generation-*/ios-intercept-ca.mobileconfig ]] && exit 1
 done
 "$REAL_MV" "$@"
 rc=$?
