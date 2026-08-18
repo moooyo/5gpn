@@ -151,6 +151,19 @@ EOF
     lineage_ready_safe || fail "committed first-lineage marker did not validate"
     printf '%s\n' partial > "$LE_ARCHIVE_ROOT/$BASE_DOMAIN/cert2.pem"
     chmod 0644 "$LE_ARCHIVE_ROOT/$BASE_DOMAIN/cert2.pem"
+    lineage_tree_fingerprint() {
+        find "$LE_ROOT" -printf '%P|%y|%m|%U|%G|%i|%l\n' | LC_ALL=C sort
+        find "$LE_ROOT" -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
+    }
+    LIVE_GENERATION=""
+    ready_before="$(lineage_tree_fingerprint)"
+    ready_lineage_is_recoverable_read_only \
+        || fail "ready lineage preflight required a pre-populated live generation"
+    ready_after="$(lineage_tree_fingerprint)"
+    [[ "$ready_after" == "$ready_before" \
+       && -z "$LIVE_GENERATION" \
+       && -f "$LE_ARCHIVE_ROOT/$BASE_DOMAIN/cert2.pem" ]] \
+        || fail "ready lineage preflight mutated recoverable Certbot state"
     live_lineage_safe || fail "safe unreferenced partial Certbot generation was not recovered"
     [[ ! -e "$LE_ARCHIVE_ROOT/$BASE_DOMAIN/cert2.pem" ]] \
         || fail "unreferenced partial Certbot generation survived recovery"

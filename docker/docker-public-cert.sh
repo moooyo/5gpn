@@ -618,8 +618,9 @@ ready_lineage_is_recoverable_read_only() {
     lineage_ready_safe \
         && lineage_set_is_exclusive \
         && renewal_conf_safe \
-        && archive_lineage_safe \
         || return 1
+    # Classify recoverability without repairing or discarding Certbot residue.
+    # The locked bootstrap transaction performs those mutations after preflight.
     scan_complete_archive_generations || return 1
     for generation in "${COMPLETE_ARCHIVE_GENERATIONS[@]}"; do
         (( 10#$generation > best )) && best=$((10#$generation))
