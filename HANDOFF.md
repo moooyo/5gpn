@@ -1,6 +1,6 @@
 # 5gpn Docker integration handoff
 
-**Recorded:** 2026-08-18
+**Recorded:** 2026-08-18. **Updated:** 2026-08-21.
 
 This file is a pickup record, not an architecture authority. Read
 [`AGENTS.md`](AGENTS.md), [`docs/architecture.md`](docs/architecture.md), and
@@ -10,18 +10,18 @@ remaining delivery work.
 
 ## Recovered branch state
 
-| Scope | Branch or source | Recovered commit | Relationship at pickup |
+| Scope | Branch or source | Recovered commit | Relationship now |
 |---|---|---|---|
-| Root installer and Docker assembly | `moooyo/5gpn:codex/docker-runtime` | `ca25ff750612d923d4a0ed865be31f481cde262f` | Three commits above `0.0.80`; the current `origin/main` tip is `af5be1b3e98a0d98399b37332aab7be626f6ba27`, 21 commits ahead of that base. |
-| Container-aware runtime | `moooyo/mihomo:codex/docker-runtime` | `9b7295f625c38dbcbfe171da364501ffab0eae95` | Must be integrated with the current `feat/5gpn-monolith` maintenance tip before a new Core release is cut. |
-| Console | `moooyo/zashboard:feat/5gpn-console` | no Docker-only patch | The Docker image must consume the exact Console coordinate paired with the current Core in `release/pins.env`. |
+| Root installer and Docker assembly | `moooyo/5gpn:codex/docker-runtime` | `ca25ff750612d923d4a0ed865be31f481cde262f` | Superseded. The branch tip has absorbed the maintenance merge and the pin update; it is ahead of `origin/main` and not behind it. |
+| Container-aware runtime | `moooyo/mihomo:codex/docker-runtime` | `9b7295f625c38dbcbfe171da364501ffab0eae95` | Integrated. Merged into `feat/5gpn-monolith` at `9497ae63` and released as `v1.19.30-monolith.34`. |
+| Console | `moooyo/zashboard:feat/5gpn-console` | no Docker-only patch | Released as `v3.21.0-monolith.34` with the deployment-neutral setup wording, paired with the Core in `release/pins.env`. |
 | Extensions | `moooyo/5gpn-extensions:main` | no Docker-only patch | Acceptance inputs must use an immutable reviewed revision and digest. |
 
 The root Docker branch introduced the single-image delivery in `5da2c6c` and
 later recorded its pickup state in `ca25ff7`. The runtime branch introduced
 certificate reload support in `7370b743` and the managed container lifecycle in
-`9b7295f6`. No Docker PR, tag, GitHub Release, or GHCR image was published from
-those branches.
+`9b7295f6`. Both Core and Console now have immutable releases; no Docker PR,
+tag, GitHub Release, or GHCR image has been published from the root repository.
 
 ## Valid design that survives the maintenance merge
 
@@ -116,32 +116,53 @@ tag.
 
 ## Release blockers and required order
 
-The root implementation is not publishable with the current pin pair. Pinned
-Core `.32` does not implement container-runtime-v2. Deployment-neutral
-Zashboard setup wording has landed on its maintenance branch but has no
-immutable release and is not yet pinned.
+Steps 1-4 below are complete as of `c420626`. The Mihomo maintenance
+integration merged into `feat/5gpn-monolith` (`9497ae63`) and shipped as
+`v1.19.30-monolith.34`; Zashboard shipped the deployment-neutral wording as
+`v3.21.0-monolith.34`; both are immutable published releases and both
+coordinates and digests are recorded in `release/pins.env` and the notice
+table. The pin pair is therefore no longer a blocker.
 
-1. Finish and review the Mihomo maintenance integration for the v2 container
+The surviving blocker is evidence. No exact image has passed release-mode
+acceptance, so `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
+`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
+`FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` are unset and the publication gate
+rejects every tag.
+
+1. ~~Finish and review the Mihomo maintenance integration for the v2 container
    lifecycle, cgroup layout, certificate manager, TLS reload, and orderly
-   shutdown.
-2. Run the proportional Mihomo build, race, vet, and acceptance gates remotely
-   on `test-env`; do not run them locally.
-3. Publish immutable container-capable Mihomo and deployment-neutral Zashboard
-   releases.
-4. Update their paired coordinates in `release/pins.env` and the
-   human-readable notice table.
+   shutdown.~~ Done: merged at `9497ae63`.
+2. ~~Run the proportional Mihomo build, race, vet, and acceptance gates remotely
+   on `test-env`; do not run them locally.~~ Done for the tagged release.
+3. ~~Publish immutable container-capable Mihomo and deployment-neutral Zashboard
+   releases.~~ Done: `v1.19.30-monolith.34` and `v3.21.0-monolith.34`.
+4. ~~Update their paired coordinates in `release/pins.env` and the
+   human-readable notice table.~~ Done at `c420626`.
 5. Run the full root shell, pin, image, and container-policy gates remotely.
-6. Build the exact reproducible image from a clean final commit with the pinned
-   Dockerfile frontend, base image, source epoch, and normalized timestamps.
+   The macOS workstation cannot substitute: most suites need bash 4+ and GNU
+   coreutils, and at least one exits zero while emitting no assertions.
+6. Merge this branch to `main` first. `.github/workflows/release.yml` requires
+   the tagged commit to be ancestor-reachable from `main` or `beta`, while
+   `tests/container-acceptance.sh` requires `HEAD` to equal
+   `FIVEGPN_EXPECTED_COMMIT`, so acceptance bound to a pre-merge commit is
+   discarded. Then build the exact reproducible image from that clean
+   post-merge commit with the pinned Dockerfile frontend, base image, pinned
+   BuildKit, source epoch, and normalized timestamps, using the exact future
+   release tag as `VERSION` — it lands in a label and therefore in the image
+   ID. `docs/docker.md` records the exact command.
 7. Run `tests/container-acceptance.sh` in release mode against that exact image
-   on the disposable Docker target.
+   on the disposable Docker target. The run is mutating: it stops, renames, and
+   re-creates the container. Release mode binds `0.0.0.0` on `853/80/443/8080/
+   8443`, so any host gateway holding those ports must be stopped first.
 8. Record only that run's exact values in
    `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
    `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
    `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID`.
 9. Require the release workflow rebuild to reproduce the accepted image ID
    before publishing the exact GHCR tag. Move stable `latest` only after the
-   GitHub Release is immutable.
+   GitHub Release is immutable. `ghcr.io/moooyo/5gpn` does not exist yet; the
+   first publication creates it private, so its visibility must be set before
+   the documented anonymous `docker compose pull` flow works.
 
 Use ordinary non-force pushes. Do not publish a tag, GHCR image, or GitHub
 Release until the current pin manifest, exact release-mode evidence, and final

@@ -203,8 +203,10 @@ sudo chmod 0600 docker/bootstrap/config.env docker/bootstrap/cloudflare_api_toke
 beta 不会更新它：
 
 > [!IMPORTANT]
-> Docker v2 尚未发布。当前 `.32` Core pin 不含 v2 contract，部署中性的
-> Console 提示也尚未发布和更新 pin；不能把现有 tag 当作 Docker v2 镜像。
+> Docker v2 尚未发布。当前 pin 的 Core/Console 配对已具备 v2 contract 且都是
+> 不可变发布，但还没有任何镜像通过 release-mode 验收，三个
+> `FIVEGPN_CONTAINER_ACCEPTED_*` 仓库变量仍为空；在那次验收完成并记录之前，
+> 不能把现有 tag 当作 Docker v2 镜像。
 
 ```bash
 docker version --format '{{.Server.Version}}'

@@ -7,16 +7,22 @@ Console, Telegram, and native extensions are not split into sidecars.
 ## Publication status
 
 The merged root implementation requires the exact offline Core handshake
-`5gpn-container-runtime-v2`. The current `release/pins.env` still names Core
-`.32`, which does not implement v2. Deployment-neutral Zashboard setup wording
-exists on its maintenance branch but has not yet been published or pinned.
-Consequently no current tag is a supported Docker v2 release and the image
-publication gate is expected to fail closed.
+`5gpn-container-runtime-v2`. `release/pins.env` now names a container-capable
+pair that satisfies it: Core `v1.19.30-monolith.34`, whose published binary
+answers the handshake, and Console `v3.21.0-monolith.34`, which carries the
+deployment-neutral setup wording. Both are immutable published releases and
+their digests are bound in the pin manifest.
+
+What still fails closed is the acceptance evidence. No exact image has passed
+release-mode acceptance, so the three `FIVEGPN_CONTAINER_ACCEPTED_*` repository
+variables are unset and the publication gate rejects every tag. No current tag
+is a supported Docker v2 release until that run exists and those variables
+record it.
 
 Do not weaken the handshake or use a development binary in a release image.
-This runbook describes the v2 delivery that becomes usable only after immutable
-compatible Core and Console releases are recorded together in
-`release/pins.env` and the exact image passes release-mode acceptance.
+This runbook describes the v2 delivery that becomes usable only after the exact
+image passes release-mode acceptance against the pinned pair already recorded
+in `release/pins.env`.
 
 ## Supported host
 
@@ -91,6 +97,20 @@ operator must publish `console.<base>` and `dot.<base>` A records that resolve
 to `DNS_PUBLIC_IP`, which defaults to `DNS_GATEWAY_IP` when no separate public
 identity is needed. The container does not create or maintain those A records.
 The Docker data plane is IPv4-only.
+
+Both bootstrap inputs are read from fixed defaults relative to the launch
+directory and may be relocated without editing `compose.yaml`:
+
+| Variable | Default | Delivered as |
+|---|---|---|
+| `FIVEGPN_BOOTSTRAP_CONFIG` | `./docker/bootstrap/config.env` | read-only bind mount at `/run/5gpn-bootstrap-input/config.env` |
+| `CLOUDFLARE_API_TOKEN_FILE` | `./docker/bootstrap/cloudflare_api_token` | Compose secret `cloudflare_api_token` |
+| `FIVEGPN_DATA_VOLUME` | `fivegpn-data` | named volume at `/etc/5gpn` |
+| `FIVEGPN_UI_VOLUME` | `fivegpn-ui` | named volume at `/opt/5gpn/ui` |
+
+Bootstrap entries must be exact `KEY=value` lines with no surrounding
+whitespace. Both the entrypoint and the public certificate helper parse this
+file, and both reject a line that carries leading or trailing spaces.
 
 ## Start
 
@@ -212,9 +232,10 @@ Compose environment variable.
 The Compose contract drops every capability and uses the bridge network's
 namespaced `net.ipv4.ip_unprivileged_port_start=0` so UID 10001 can bind low
 ports without `NET_BIND_SERVICE`. It also uses `no-new-privileges`, a private
-cgroup namespace, Docker 28 writable-cgroup delegation, and the shipped
-clone3-aware seccomp profile. It does not use `privileged`, `SYS_ADMIN`, an
-unconfined profile, the Docker socket, or a host cgroup bind mount.
+cgroup namespace, Docker 28 writable-cgroup delegation, `pids_limit: 256`, and
+the shipped clone3-aware seccomp profile. It does not use `privileged`,
+`SYS_ADMIN`, an unconfined profile, the Docker socket, or a host cgroup bind
+mount.
 
 `5gpn-mihomo` is the sole long-running process. Initial bootstrap commands and
 runtime certificate reconciliation commands are trusted short-lived children;

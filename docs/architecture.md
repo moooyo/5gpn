@@ -413,7 +413,7 @@ exists, bootstrap may clean only marker-owned partial first-boot lineage files
 and never deletes ACME accounts. After it exists, a damaged current lineage is
 restored only from a previously validated complete generation or fails closed;
 it is never silently reset. Public-role generation collection first renames a
-candidate to `.delete.generation-*` in the same role directory and removes only
+candidate to `.delete.<pid>.<random>` in the same role directory and removes only
 that tombstone, so an interrupted deletion cannot make a live generation
 ambiguous.
 
@@ -1356,8 +1356,10 @@ current `release/pins.env` Core digest, and
 No hosted-runner fallback or historical development result may satisfy these
 coordinates.
 
-The merged root implementation requires runtime-v2, but the currently pinned
-Core `.32` does not provide that handshake. The deployment-neutral Zashboard
-setup wording also remains unpublished and unpinned. Until immutable compatible
-Core and Console releases replace both coordinates in `release/pins.env`, the
-Docker release gate is expected to fail closed.
+The merged root implementation requires runtime-v2, and `release/pins.env` now
+records a pair that provides it: Core `v1.19.30-monolith.34` answers the
+handshake and Console `v3.21.0-monolith.34` carries the deployment-neutral
+setup wording, both as immutable published releases. The gate nonetheless
+remains closed because no exact image has passed release-mode acceptance and
+the three `FIVEGPN_CONTAINER_ACCEPTED_*` variables are unset. Until that run
+exists and records them, the Docker release gate is expected to fail closed.

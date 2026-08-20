@@ -413,10 +413,11 @@ pin manifest, and `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` matches the
 reproducibly rebuilt candidate. Update those variables only after the exact
 candidate passes from a checkout whose Git root, HEAD, and versioned acceptance
 inputs match that commit byte-for-byte.
-The currently pinned Core `.32` does not implement container-runtime-v2, and
-the deployment-neutral Console wording has not yet been published and pinned.
-Both are release blockers; do not weaken the handshake or describe the current
-pin pair as a publishable Docker image.
+The pinned pair already implements container-runtime-v2 and carries the
+deployment-neutral Console wording, so the pins are no longer the blocker. The
+surviving blocker is that no exact image has passed release-mode acceptance and
+the three variables are unset; do not weaken the handshake or describe an
+unaccepted image as a publishable Docker release.
 
 Preserve unrelated dirty-worktree changes. Use `rg` for discovery and
 `apply_patch` for edits. Until a release policy says otherwise, change stale

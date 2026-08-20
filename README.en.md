@@ -210,9 +210,11 @@ tag. Stable publication updates the convenience registry alias `latest`, but
 the release bundle never defaults to a movable alias; beta never updates it:
 
 > [!IMPORTANT]
-> Docker v2 is not published yet. The current `.32` Core pin lacks the v2
-> contract, and the deployment-neutral Console wording has not yet been
-> released and pinned. No current tag should be treated as a Docker v2 image.
+> Docker v2 is not published yet. The pinned Core and Console pair already
+> carries the v2 contract and both are immutable releases, but no image has
+> passed release-mode acceptance and the three `FIVEGPN_CONTAINER_ACCEPTED_*`
+> repository variables are unset. No current tag should be treated as a Docker
+> v2 image until that run exists and records them.
 
 ```bash
 docker version --format '{{.Server.Version}}'

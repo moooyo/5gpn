@@ -69,9 +69,10 @@ Update the status and the normative documentation when an implementation lands.
 
 ## Simplified Docker delivery
 
-**Status: Implemented on the merged root maintenance line; immutable Core and
-Console publication, pin updates, and fresh release acceptance remain pending.
-Recorded 2026-08-09, updated 2026-08-18.**
+**Status: Implemented on the merged root maintenance line; the container-capable
+Core and Console pair is published and pinned. Fresh release-mode acceptance and
+the resulting `FIVEGPN_CONTAINER_ACCEPTED_*` variables remain pending.
+Recorded 2026-08-09, updated 2026-08-21.**
 
 - Docker is a packaging and process-lifecycle variant, not a second runtime
   architecture. One `linux/amd64` image runs as one container and one Compose
@@ -104,7 +105,7 @@ Recorded 2026-08-09, updated 2026-08-18.**
   it exists, only marker-owned first-boot partials may be cleaned and ACME
   accounts remain; after it exists, an invalid current lineage restores only a
   validated complete generation or fails closed. Role generation deletion uses
-  `.delete.generation-*` tombstones.
+  `.delete.<pid>.<random>` tombstones.
 - The owner explicitly accepts weaker key isolation in exchange for a single
   container. The same `fivegpn` container identity can read the Cloudflare
   token, ACME account, public private keys, and interception CA signing key.
@@ -162,12 +163,12 @@ Recorded 2026-08-09, updated 2026-08-18.**
 - The older branch passed development-mode acceptance before the current-schema
   installer, container-runtime-v2 contract, centralized pin manifest, durable
   UI volume, and acceptance-safety changes landed. That evidence is historical
-  and cannot authorize publication of the merged result. The currently pinned
-  Core `.32` lacks runtime-v2. Deployment-neutral Console wording exists on the
-  maintenance branch but has not been published or pinned. Publish only after
-  immutable compatible Core and Console artifacts are recorded together in
-  `release/pins.env` and the exact merged image passes fresh release-mode
-  acceptance.
+  and cannot authorize publication of the merged result. The container-capable
+  pair is now recorded in `release/pins.env` — Core `v1.19.30-monolith.34`
+  answers the runtime-v2 handshake and Console `v3.21.0-monolith.34` carries the
+  deployment-neutral wording — so publication now waits only on the exact merged
+  image passing fresh release-mode acceptance and the three
+  `FIVEGPN_CONTAINER_ACCEPTED_*` variables recording that run.
 
 ## Cross-repository development baselines
 
