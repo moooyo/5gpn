@@ -26,6 +26,10 @@ LABEL org.opencontainers.image.title="5gpn" \
 # debian:13-slim intentionally omits a CA bundle. Component preparation also
 # verifies one dated Mozilla bundle so APT can reach the immutable Debian
 # snapshot over HTTPS. Debian's pinned ca-certificates package replaces it.
+# /etc/ssl/certs does not exist in the base image, so COPY creates it, and the
+# mode it inherits is not traversable by APT's unprivileged _apt user (uid 42).
+# The RUN below therefore restores 0755 on both directories before apt-get; skip
+# it and every fetch fails with "Could not load certificates ... (CaInfo option)".
 COPY --chmod=0644 docker/build/components/bootstrap-ca.pem /etc/ssl/certs/ca-certificates.crt
 
 # GitHub release assets are intentionally absent from this layer. They must
@@ -36,6 +40,7 @@ RUN printf '%s\n' \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie-updates main" \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ trixie-security main" \
         > /etc/apt/sources.list \
+    && chmod 0755 /etc/ssl /etc/ssl/certs \
     && chmod 0644 /etc/ssl/certs/ca-certificates.crt \
     && rm -f /etc/apt/sources.list.d/debian.sources \
     && apt-get \
