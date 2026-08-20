@@ -52,6 +52,7 @@ LINEAGE_READY_VALUE_PREFIX=5gpn-docker-lineage-ready-v1
 LINEAGE_READY_CANDIDATE=.5gpn-docker-lineage-ready.new
 UI_HELPER_LOADED=0
 CERT_ROLE_HELPERS_LOADED=0
+CERTBOT_FAILURE_CLASS=transient
 LIVE_GENERATION=""
 declare -a COMPLETE_ARCHIVE_GENERATIONS=()
 
@@ -1057,8 +1058,42 @@ ensure_lock() {
     flock -w 10 9
 }
 
+# Certbot exits 1 for nearly every failure, so its output is the only usable
+# signal. Only classify what a retry provably cannot fix; the caller's ladder
+# handles everything else.
+#
+# Be precise about certbot 4.0.0's dns-cloudflare plugin, which Debian 13 ships.
+# _find_zone_id has four raise paths and only three are permanent:
+#   1. "Error determining zone_id: <code> <msg>. Please confirm that you have
+#      supplied valid Cloudflare API credentials." -- only for codes 6003, 9103
+#      and 9109, i.e. a genuinely bad token or key.
+#   2. "...Please confirm that the domain name has been entered correctly and
+#      your Cloudflare Token has access to the domain."
+#   4. "...Please confirm that the domain name has been entered correctly and is
+#      already associated with the supplied Cloudflare account."
+#   3. "...The error from Cloudflare was: <code> <msg>." -- the FALL-THROUGH for
+#      every unrecognised CloudFlareAPIError, which includes 429 and 5xx. A
+#      broad /determin(e|ing) zone_id/ match would sweep this transient class in
+#      with the permanent ones and skip the ladder during a Cloudflare outage,
+#      so the patterns below deliberately key on the two "Please confirm" and
+#      the hinted-code wordings instead.
+#
+# Rate limits are split the same way. "too many certificates" (168h) and "too
+# many registrations" (3h) both outlast the ladder's 96 minutes, so retrying is
+# pointless. "too many failed authorizations" refills within the hour and is
+# exactly what the 1800s and 3600s rungs exist for, so it stays transient.
+certbot_failure_is_permanent() {
+    local log="$1"
+    grep -qiE \
+        -e 'acme:error:(rejectedidentifier|invalidemail|unsupportedidentifier)' \
+        -e 'too many (certificates|registrations)' \
+        -e 'error determining zone_id: (6003|9103|9109) ' \
+        -e 'please confirm that the domain name has been entered correctly' \
+        -- "$log"
+}
+
 run_certbot_bootstrap() {
-    local force="$1"
+    local force="$1" log rc=0
     local -a args=(certonly
         --config-dir "$LE_ROOT"
         --work-dir "$LE_WORK_ROOT"
@@ -1080,17 +1115,40 @@ run_certbot_bootstrap() {
     else
         args+=(--keep-until-expiring)
     fi
-    certbot "${args[@]}"
+    CERTBOT_FAILURE_CLASS=transient
+    log="$(mktemp "${TMPDIR}/5gpn-certbot.XXXXXX")" || return 1
+    chmod 0600 "$log" || { rm -f -- "$log"; return 1; }
+    # tee keeps the operator's live view of a multi-minute propagation wait
+    # while still giving the classifier the complete text.
+    if certbot "${args[@]}" 2>&1 | tee -- "$log"; then
+        rc=0
+    else
+        rc=$?
+        certbot_failure_is_permanent "$log" && CERTBOT_FAILURE_CLASS=permanent
+    fi
+    rm -f -- "$log"
+    return "$rc"
 }
 
 run_certbot_renew() {
-    certbot renew \
+    local log rc=0
+    CERTBOT_FAILURE_CLASS=transient
+    log="$(mktemp "${TMPDIR}/5gpn-certbot.XXXXXX")" || return 1
+    chmod 0600 "$log" || { rm -f -- "$log"; return 1; }
+    if certbot renew \
         --config-dir "$LE_ROOT" \
         --work-dir "$LE_WORK_ROOT" \
         --logs-dir "$LE_LOG_ROOT" \
         --cert-name "$BASE_DOMAIN" \
         --non-interactive \
-        --no-directory-hooks
+        --no-directory-hooks 2>&1 | tee -- "$log"; then
+        rc=0
+    else
+        rc=$?
+        certbot_failure_is_permanent "$log" && CERTBOT_FAILURE_CLASS=permanent
+    fi
+    rm -f -- "$log"
+    return "$rc"
 }
 
 bootstrap_public_certificate() {
@@ -1118,8 +1176,14 @@ bootstrap_public_certificate() {
             return 1
         fi
         info "Obtaining the single Cloudflare DNS-01 lineage for ${BASE_DOMAIN}."
-        run_certbot_bootstrap "$force" \
-            || { err "Cloudflare DNS-01 certificate issuance failed transiently."; return 75; }
+        if ! run_certbot_bootstrap "$force"; then
+            if [[ "$CERTBOT_FAILURE_CLASS" == permanent ]]; then
+                err "Cloudflare DNS-01 certificate issuance failed permanently; retrying cannot help. Check the API token scope, the zone, and the Let's Encrypt rate limit, then recreate the container."
+                return 78
+            fi
+            err "Cloudflare DNS-01 certificate issuance failed transiently."
+            return 75
+        fi
     fi
     live_lineage_safe \
         || { err "The issued lineage failed its exact SAN, key, or provenance checks."; return 1; }
@@ -1141,7 +1205,17 @@ renew_public_certificate() {
         || { err "The single Cloudflare lineage is missing or unsafe."; return 1; }
     if ! openssl x509 -in "$cert" -noout -checkend "$RENEW_BEFORE_SECONDS" >/dev/null 2>&1; then
         info "The public certificate is due; running the scoped Cloudflare renewal."
-        run_certbot_renew || { err "Scoped Cloudflare DNS-01 renewal failed."; return 1; }
+        if ! run_certbot_renew; then
+            # The Core's certificate manager owns the retry cadence and its own
+            # bounded backoff, so this helper must return promptly rather than
+            # sleep. Only the diagnosis changes with the classification.
+            if [[ "$CERTBOT_FAILURE_CLASS" == permanent ]]; then
+                err "Scoped Cloudflare DNS-01 renewal failed permanently; retrying cannot help. Check the API token scope, the zone, and the Let's Encrypt rate limit."
+            else
+                err "Scoped Cloudflare DNS-01 renewal failed."
+            fi
+            return 1
+        fi
         openssl x509 -in "$cert" -noout -checkend "$RENEW_BEFORE_SECONDS" >/dev/null 2>&1 \
             || { err "Certbot returned without a fresh valid exact-SAN lineage."; return 1; }
     fi
@@ -1156,7 +1230,7 @@ main() {
     [[ $# == 1 ]] || { err "Usage: $0 preflight|bootstrap|renew"; return 2; }
     [[ "$EUID" == "$EXPECTED_UID" && "$CURRENT_GID" == "$EXPECTED_GID" ]] \
         || { err "Docker certificate helpers require fixed UID:GID 10001:10001."; return 1; }
-	for command in certbot openssl flock sha256sum sync find sort cmp grep sed; do
+	for command in certbot openssl flock sha256sum sync find sort cmp grep sed tee mktemp; do
         command -v "$command" >/dev/null 2>&1 \
             || { err "Required certificate tool is unavailable: $command"; return 1; }
     done

@@ -143,12 +143,21 @@ Cloudflare Certbot lineage for `<base>` and `*.<base>`, publishes the `dot` and
 one complete `/opt/5gpn/ui/current` generation. Finally it validates the whole
 Mihomo configuration and `exec`s `5gpn-mihomo` as PID 1.
 
-ACME issuance failure is retried with bounded backoff. Structural, permission,
-lineage, volume, document, and publication failures stop that attempt without
-silently repairing or adopting state. Because Compose uses
-`restart: unless-stopped`, a deterministic error retries the whole container
-until the operator stops it and fixes the input. Restart is crash recovery, not
-configuration repair.
+Transient ACME issuance failure is retried in place with bounded backoff at 60,
+300, 1800, and 3600 seconds. A failure certbot's output proves cannot succeed on
+retry — a token that cannot see the zone, a rejected identifier, a rate limit
+whose window outlasts that ladder — is reported immediately with its cause,
+then held for an hour before the process exits. The hold is deliberate: because
+Compose uses `restart: unless-stopped`, exiting is not a way to stop attempting.
+Docker restarts on every exit code and resets its restart backoff after any run
+lasting ten seconds or more, so an immediate exit would issue a fresh Let's
+Encrypt order roughly every fifteen seconds. Holding bounds a permanent
+misconfiguration to about one order per hour while the operator reads the cause.
+
+Structural, permission, lineage, volume, document, and publication failures stop
+that attempt without silently repairing or adopting state. A deterministic error
+retries the whole container until the operator stops it and fixes the input.
+Restart is crash recovery, not configuration repair.
 
 The persistent `.5gpn-docker-lineage-ready` marker is the first complete public
 lineage commit fence and binds the base domain. Before that fence, bootstrap
@@ -277,13 +286,51 @@ Compose and seccomp contracts, the acceptance driver and probes, the compressed
 Core artifact digest, and the exact image ID. A copied, dirty, or weakened
 harness cannot produce release evidence by repeating an expected commit string.
 
-After compatible Core and Console releases have been pinned, the evidence flow
-is:
+### Build the candidate
+
+Build only through
+[`docker/build-candidate-image.sh`](../docker/build-candidate-image.sh). The
+release workflow runs the same script, and it refuses to publish unless its
+rebuild reproduces the accepted image ID exactly. Any other build — a bare
+`docker build`, the default builder, an unset `SOURCE_DATE_EPOCH` — can pass
+acceptance and then fail that comparison with no useful diagnostic.
+
+`--tag` must be the exact tag that will later be pushed. It becomes `VERSION`,
+lands in `org.opencontainers.image.version`, and therefore changes the image
+ID, so the tag string has to be decided before acceptance rather than after.
+
+```bash
+image_id="$(bash docker/build-candidate-image.sh --tag X.Y.Z)"
+echo "$image_id"
+```
+
+The build must run from a clean checkout of the commit that will be tagged.
+Because the release workflow requires the tagged commit to be reachable from
+`main` or `beta` while the acceptance driver requires `HEAD` to equal
+`FIVEGPN_EXPECTED_COMMIT`, merge first and build the post-merge commit;
+acceptance bound to a pre-merge commit is discarded by the merge.
+
+### Prepare the target
+
+Release mode publishes `0.0.0.0` on `853`, `80`, `443`, `8080`, and `8443`. Any
+host gateway already holding those ports must be stopped for the run. The
+driver also requires:
+
+- zero installed extensions on the candidate;
+- a system-trusted public lineage the candidate already holds, or
+  `FIVEGPN_CONTROLLER_CA_FILE` pointing at a PEM bundle that verifies it;
+- `FIVEGPN_CONTROLLER_SECRET_FILE` as a single-link mode-0600 regular file of
+  at most 4096 bytes holding one 16-to-512-character token.
+
+The run is mutating: it stops, renames, and re-creates the named container,
+rolling back on failure.
+
+### Run release acceptance
 
 ```bash
 accepted_commit="$(git rev-parse HEAD)"
 accepted_mihomo_sha="$(sed -n 's/^MIHOMO_SHA256=//p' release/pins.env)"
-accepted_container=FIVEGPN_ACCEPTED_CONTAINER
+accepted_container=fivegpn-gateway   # the candidate container's actual name
 evidence="container-acceptance-${accepted_commit}.log"
 
 set -o pipefail
@@ -296,6 +343,34 @@ FIVEGPN_CONTROLLER_SECRET_FILE=/root/acceptance/controller-secret \
   bash tests/container-acceptance.sh "$accepted_container" \
   | tee "$evidence"
 ```
+
+`git status --porcelain` must be empty before this runs; the driver compares
+every versioned acceptance input against `git show HEAD:<path>`.
+
+### Development mode
+
+Development mode rehearses the same probes without producing release evidence.
+It remaps the published ports to loopback highports so it can coexist with a
+host gateway, and it deliberately emits differently named variables that the
+release gate will not accept. It takes
+`FIVEGPN_EXPECTED_MIHOMO_BINARY_SHA256` — the digest of a locally built binary
+— instead of `FIVEGPN_EXPECTED_MIHOMO_SHA256`, which must be absent.
+
+```bash
+FIVEGPN_ACCEPTANCE_HOST=test-env \
+FIVEGPN_ACCEPTANCE_TARGET=disposable \
+FIVEGPN_ACCEPTANCE_MODE=development \
+FIVEGPN_EXPECTED_COMMIT="$(git rev-parse HEAD)" \
+FIVEGPN_EXPECTED_MIHOMO_BINARY_SHA256=<64-hex> \
+FIVEGPN_DEVELOPMENT_PROJECT=<safe test project name> \
+FIVEGPN_DEVELOPMENT_BIND_IP=127.0.0.1 \
+FIVEGPN_DEVELOPMENT_HOST_PORTS='{"853":2853,"80":20080,"443":20443,"8080":28080,"8443":28443}' \
+FIVEGPN_CAPABILITIES_URL=https://console.example.com:20443/capabilities \
+FIVEGPN_CONTROLLER_SECRET_FILE=/root/acceptance/controller-secret \
+  bash tests/container-acceptance.sh <container>
+```
+
+### Record the evidence
 
 Only the exact release-mode output may populate:
 

@@ -49,9 +49,11 @@ RUN printf '%s\n' \
         ca-certificates \
         certbot \
         coreutils \
+        diffutils \
         findutils \
         iproute2 \
         jq \
+        mawk \
         openssl \
         passwd \
         python3-certbot-dns-cloudflare \

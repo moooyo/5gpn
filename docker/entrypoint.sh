@@ -24,6 +24,10 @@ readonly BOOTSTRAP_CONFIG=/run/5gpn-bootstrap/config.env
 readonly CF_SECRET=/run/secrets/cloudflare_api_token
 readonly CF_CREDENTIAL=/run/5gpn/cloudflare.ini
 readonly CONFIG_ROOT=/etc/5gpn
+readonly CGROUP_ROOT=/sys/fs/cgroup
+# At least the tail of the transient retry ladder, so a permanent failure can
+# never restart faster than a transient one retried.
+readonly PERMANENT_ACME_HOLD_SECONDS=3600
 readonly MIHOMO_HOME=/etc/5gpn/mihomo
 readonly FIVEGPN_STATE=/etc/5gpn/mihomo/5gpn
 readonly MIHOMO_CONFIG=/etc/5gpn/mihomo/config.yaml
@@ -171,6 +175,39 @@ verify_runtime_contract() {
         || fatal "The image runtime does not implement 5gpn-container-runtime-v2."
 }
 
+# The Core re-establishes and enforces the delegated cgroup layout itself, but
+# it does so after listeners are prepared and therefore after bootstrap has
+# already obtained a real ACME lineage, minted the interception CA key, and
+# published a complete UI generation. A host that never had writable delegation
+# would burn a production certificate order on every attempt and then die with
+# an isolation-probe message that never names the missing Compose setting.
+# These checks are read-only and mirror the Core's own preconditions in
+# 5gpn/engine/worker_process_linux.go.
+verify_cgroup_delegation() {
+    local fstype self controllers controller
+    fstype="$(stat -f -c %T -- "$CGROUP_ROOT" 2>/dev/null)" \
+        || fatal "Could not inspect $CGROUP_ROOT; the container has no cgroup mount."
+    [[ "$fstype" == cgroup2fs ]] \
+        || fatal "Extension workers require a pure cgroup v2 hierarchy at $CGROUP_ROOT, found '$fstype'. Use a host with unified cgroups and Docker's systemd cgroup driver."
+
+    [[ -r /proc/self/cgroup ]] \
+        || fatal "Could not read /proc/self/cgroup."
+    self="$(trim "$(cat /proc/self/cgroup)")"
+    [[ "$self" == '0::/' ]] \
+        || fatal "The container must start in a private cgroup namespace root, found '$self'. Set 'cgroup: private' on the Compose service."
+
+    [[ -r "$CGROUP_ROOT/cgroup.controllers" ]] \
+        || fatal "Could not read $CGROUP_ROOT/cgroup.controllers."
+    controllers="$(<"$CGROUP_ROOT/cgroup.controllers")"
+    for controller in memory pids; do
+        [[ " $controllers " == *" $controller "* ]] \
+            || fatal "Extension workers require the cgroup $controller controller, which this host does not delegate."
+    done
+
+    [[ -w "$CGROUP_ROOT/cgroup.subtree_control" && -w "$CGROUP_ROOT/cgroup.procs" ]] \
+        || fatal "The delegated cgroup at $CGROUP_ROOT is not writable. Set 'writable-cgroups=true' in the Compose service security_opt and use rootful Docker Engine 28 or newer."
+}
+
 assert_current_directory() {
     local path="$1"
     [[ -d "$path" && ! -L "$path" ]] \
@@ -280,8 +317,14 @@ load_bootstrap_config() {
         [[ -z "${BOOTSTRAP[$key]+present}" ]] \
             || fatal "Duplicate Docker bootstrap key: $key"
         [[ -n "$value" ]] || fatal "Docker bootstrap value is empty: $key"
-        [[ "$line" == "$key=$value" ]] \
-            || fatal "Docker bootstrap entries must use exact KEY=value syntax at line $line_number."
+        # Compare against the untrimmed line, not the trimmed one. The public
+        # certificate helper reads this same file with `grep -E "^KEY="` over raw
+        # bytes and then regex-checks the raw value, so a leading or trailing
+        # space that a trimmed comparison accepts here would be rejected there --
+        # after bootstrap had already blessed the file -- and `restart:
+        # unless-stopped` would loop that failure forever.
+        [[ "$raw" == "$key=$value" ]] \
+            || fatal "Docker bootstrap entries must use exact KEY=value syntax with no surrounding whitespace; fix $key at line $line_number."
         BOOTSTRAP[$key]="$value"
     done < "$BOOTSTRAP_CONFIG"
 
@@ -671,6 +714,25 @@ bootstrap_public_certificate() {
         else
             rc=$?
         fi
+        if [[ "$rc" == 78 ]]; then
+            # 78 is the helper's permanent verdict: the operator must change
+            # something before any attempt can succeed. Exiting is nonetheless
+            # not a way to stop attempting. `restart: unless-stopped` restarts
+            # on every exit code, and Docker resets its restart backoff whenever
+            # the previous run lasted at least ten seconds -- which every
+            # bootstrap does, since the runtime handshake, volume locks, mount
+            # validation, and interception CA init all precede certbot.
+            # Measured on Docker 29: a container that runs 12s and exits 1
+            # restarts roughly every 15s, with no backoff growth at all. So
+            # returning here immediately would turn one permanent
+            # misconfiguration into a fresh Let's Encrypt order every 15
+            # seconds, an order of magnitude worse than the ladder below.
+            # Holding first bounds it to about one order per hour while the
+            # operator reads the cause the helper already printed.
+            info "Permanent ACME failure; holding ${PERMANENT_ACME_HOLD_SECONDS}s before exit so the container restart policy cannot re-enter the Let's Encrypt order budget."
+            run_sync sleep "$PERMANENT_ACME_HOLD_SECONDS" || return $?
+            return 78
+        fi
         [[ "$rc" == 75 ]] || return "$rc"
         if (( delay_index >= ${#delays[@]} )); then
             return 75
@@ -874,6 +936,7 @@ main() {
         || fatal "The OCI process must start as fixed UID:GID 10001:10001."
 
     verify_runtime_contract
+    verify_cgroup_delegation
     prepare_bootstrap_config
     load_bootstrap_config
     validate_bootstrap_values

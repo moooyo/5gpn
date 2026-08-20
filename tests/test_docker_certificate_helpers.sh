@@ -29,6 +29,44 @@ for helper in "$PUBLIC" "$INTERCEPT"; do
 done
 pass "Docker runtime helpers require the image-seeded v2 ownership roots"
 
+# Behavioral check of the certbot failure classifier against the exact message
+# strings certbot 4.0.0 emits, which is what Debian 13 ships. The distinction
+# matters in both directions: a transient failure called permanent skips the
+# retry ladder during a Cloudflare outage, and a permanent one called transient
+# spends 96 minutes of ACME budget per boot.
+classifier_probe() {
+    local want="$1" message="$2" got
+    printf '%s\n' "$message" > "$TMP/certbot.log"
+    if certbot_failure_is_permanent "$TMP/certbot.log"; then got=permanent; else got=transient; fi
+    [[ "$got" == "$want" ]] \
+        || fail "certbot classifier returned $got, wanted $want, for: ${message:0:70}"
+}
+(
+    eval "$(sed -n '/^certbot_failure_is_permanent()/,/^}/p' "$PUBLIC")"
+    zone_prefix="Unable to determine zone_id for example.com using zone names: ['example.com']."
+    # _find_zone_id's three permanent raises: hinted credential codes, and the
+    # two "Please confirm that the domain name has been entered correctly" forms.
+    classifier_probe permanent "Error determining zone_id: 6003 Invalid request headers. Please confirm that you have supplied valid Cloudflare API credentials."
+    classifier_probe permanent "Error determining zone_id: 9103 Unknown X-Auth-Key or X-Auth-Email. Please confirm that you have supplied valid Cloudflare API credentials."
+    classifier_probe permanent "Error determining zone_id: 9109 Invalid access token. Please confirm that you have supplied valid Cloudflare API credentials."
+    classifier_probe permanent "$zone_prefix Please confirm that the domain name has been entered correctly and your Cloudflare Token has access to the domain."
+    classifier_probe permanent "$zone_prefix Please confirm that the domain name has been entered correctly and is already associated with the supplied Cloudflare account."
+    # The fall-through raise carries every unrecognised Cloudflare API error,
+    # including 429 and 5xx. It must stay transient.
+    classifier_probe transient "$zone_prefix The error from Cloudflare was: 10000 Rate limited."
+    classifier_probe transient "$zone_prefix The error from Cloudflare was: None Bad Gateway."
+    classifier_probe transient "Network error contacting the Cloudflare API while looking up the zone for example.com"
+    # Rate limits split by window: 168h and 3h outlast the ladder, the hourly
+    # failed-authorization budget is exactly what the ladder rides out.
+    classifier_probe permanent "Error creating new order :: too many certificates already issued for this exact set of domains"
+    classifier_probe permanent "urn:ietf:params:acme:error:rateLimited: too many registrations for this IP"
+    classifier_probe transient "urn:ietf:params:acme:error:rateLimited: too many failed authorizations recently"
+    classifier_probe permanent "urn:ietf:params:acme:error:rejectedIdentifier: Cannot issue for example.invalid"
+    classifier_probe transient "urn:ietf:params:acme:error:serverInternal: The server experienced an internal error"
+    classifier_probe transient "Connection refused while contacting acme-v02.api.letsencrypt.org"
+)
+pass "certbot failures classify correctly against certbot 4.0.0 message strings"
+
 grep -Fxq 'CONFIG_FILE=/run/5gpn-bootstrap/config.env' "$PUBLIC" \
     && grep -Fxq 'CF_CREDENTIAL=/run/5gpn/cloudflare.ini' "$PUBLIC" \
     && grep -Fxq 'LE_ROOT=/etc/5gpn/letsencrypt' "$PUBLIC" \

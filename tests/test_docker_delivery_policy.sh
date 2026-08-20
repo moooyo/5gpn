@@ -258,8 +258,6 @@ fi
 
 if grep -Fq 'packages: write' "$RELEASE" \
    && grep -Fq 'IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}' "$RELEASE" \
-   && grep -Fq "grep -Fxq 'MIHOMO_SOURCE=pinned-release'" "$RELEASE" \
-   && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v2' "$RELEASE" \
    && grep -Fq 'release_artifact_sha256 mihomo' "$RELEASE" \
    && grep -Fq 'remote_id" == "$candidate_id" && "$remote_labels" == "$candidate_labels' "$RELEASE" \
    && grep -Fq '(has("manifests") | not)' "$RELEASE" \
@@ -267,9 +265,6 @@ if grep -Fq 'packages: write' "$RELEASE" \
    && grep -Fq 'map(select(startswith("OCI image: ")))) ==' "$RELEASE" \
    && grep -Fq 'Remote release asset differs from local bytes: $asset' "$RELEASE" \
    && grep -Fq 'Exact OCI tag moved during publication.' "$RELEASE" \
-   && grep -Fq 'touch -h -d "@${source_epoch}"' "$RELEASE" \
-   && grep -Fq 'moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "$RELEASE" \
-   && grep -Fq 'rewrite-timestamp=true' "$RELEASE" \
    && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_COMMIT' "$RELEASE" \
    && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256' "$RELEASE" \
    && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID' "$RELEASE" \
@@ -286,6 +281,31 @@ if grep -Fq 'packages: write' "$RELEASE" \
     pass "release publishes an exact GHCR tag and advances latest only for stable"
 else
     fail "GHCR tag or stable/beta latest policy drifted"
+fi
+
+# The candidate build has exactly one definition. If the release job ever
+# re-inlines it, the maintainer who ran test-env acceptance and the job that
+# rebuilds before publishing stop executing the same steps -- and the only
+# symptom is an image-ID mismatch with no diagnostic.
+CANDIDATE_BUILD="$ROOT/docker/build-candidate-image.sh"
+if [[ -x "$CANDIDATE_BUILD" ]] \
+   && grep -Fq 'bash docker/build-candidate-image.sh' "$RELEASE" \
+   && grep -Fq -- '--tag "${GITHUB_REF_NAME}"' "$RELEASE" \
+   && ! grep -Fq 'docker buildx build' "$RELEASE"; then
+    pass "the release job delegates the candidate build to its single definition"
+else
+    fail "the release job does not build through docker/build-candidate-image.sh"
+fi
+if grep -Fq "grep -Fxq 'MIHOMO_SOURCE=pinned-release'" "$CANDIDATE_BUILD" \
+   && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v2' "$CANDIDATE_BUILD" \
+   && grep -Fq 'touch -h -d "@${source_epoch}"' "$CANDIDATE_BUILD" \
+   && grep -Fq 'moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "$CANDIDATE_BUILD" \
+   && grep -Fq 'rewrite-timestamp=true' "$CANDIDATE_BUILD" \
+   && grep -Fq 'VERSION=${RELEASE_TAG}' "$CANDIDATE_BUILD" \
+   && grep -Fq 'git status --porcelain' "$CANDIDATE_BUILD"; then
+    pass "the candidate build pins its frontend, epoch, tag, and clean checkout"
+else
+    fail "the candidate build lost a reproducibility input"
 fi
 
 ACCEPTANCE="$ROOT/tests/container-acceptance.sh"
@@ -345,5 +365,107 @@ for doc in README.md README.en.md docs/architecture.md docs/docker.md MEMORY.md 
         fail "$doc omits the Docker delivery contract"
     fi
 done
+
+ENTRYPOINT="$ROOT/docker/entrypoint.sh"
+PUBLIC_CERT="$ROOT/docker/docker-public-cert.sh"
+
+# The public certificate helper reads the same bootstrap file with `grep -E
+# "^KEY="` over raw bytes. If the entrypoint validated a trimmed copy instead,
+# a leading or trailing space would pass bootstrap and then fail the helper,
+# and `restart: unless-stopped` would loop that forever.
+bootstrap_parser="$(sed -n '/^load_bootstrap_config()/,/^}/p' "$ENTRYPOINT")"
+if grep -Fq '[[ "$raw" == "$key=$value" ]]' <<<"$bootstrap_parser" \
+   && ! grep -Fq '[[ "$line" == "$key=$value" ]]' <<<"$bootstrap_parser"; then
+    pass "bootstrap entries are validated against the untrimmed line"
+else
+    fail "bootstrap parser accepts whitespace the certificate helper rejects"
+fi
+if grep -Fq 'config_get()' "$PUBLIC_CERT" \
+   && grep -Fq 'grep -cE "^${key}=" "$CONFIG_FILE"' "$PUBLIC_CERT"; then
+    pass "the certificate helper remains the strict raw-byte reference parser"
+else
+    fail "the certificate helper no longer reads raw KEY= bytes"
+fi
+
+# Delegation must be proven before bootstrap spends a real ACME order and mints
+# the interception CA key; the Core only checks it after listeners prepare.
+if grep -Fq 'verify_cgroup_delegation' "$ENTRYPOINT"; then
+    main_body="$(sed -n '/^main()/,/^}/p' "$ENTRYPOINT")"
+    cgroup_line="$(grep -n 'verify_cgroup_delegation' <<<"$main_body" | head -n 1 | cut -d: -f1)"
+    cert_line="$(grep -n 'preflight_certificate_state\|bootstrap_public_certificate\|INTERCEPT_CERT_HELPER' <<<"$main_body" | head -n 1 | cut -d: -f1)"
+    if [[ -n "$cgroup_line" && -n "$cert_line" ]] && (( cgroup_line < cert_line )); then
+        pass "cgroup delegation is verified before any certificate work"
+    else
+        fail "cgroup delegation is not verified before certificate work"
+    fi
+    for signal in 'cgroup2fs' "0::/" 'writable-cgroups=true' 'cgroup: private'; do
+        grep -Fq "$signal" "$ENTRYPOINT" \
+            || fail "cgroup preflight does not name the required host setting: $signal"
+    done
+else
+    fail "the entrypoint has no cgroup delegation preflight"
+fi
+
+# Retrying a permanent certbot failure is pointless, but exiting is not how you
+# stop: `restart: unless-stopped` restarts on any exit code and Docker resets
+# its backoff after a >=10s run, so a bare early return attempts a fresh ACME
+# order roughly every 15 seconds. The hold is the load-bearing half of the fix.
+if grep -Fq 'certbot_failure_is_permanent' "$PUBLIC_CERT" \
+   && grep -Fq 'return 78' "$PUBLIC_CERT" \
+   && grep -Fq 'return 75' "$PUBLIC_CERT"; then
+    pass "certbot failures are split into permanent and transient verdicts"
+else
+    fail "every certbot failure is still classified transient"
+fi
+if grep -Fq 'PERMANENT_ACME_HOLD_SECONDS' "$ENTRYPOINT" \
+   && grep -Fq 'run_sync sleep "$PERMANENT_ACME_HOLD_SECONDS"' "$ENTRYPOINT"; then
+    pass "a permanent ACME verdict holds before exit instead of hot-restarting"
+else
+    fail "a permanent ACME verdict exits straight into the container restart loop"
+fi
+
+# certbot 4.0.0's _find_zone_id funnels unrecognised Cloudflare API errors --
+# including 429 and 5xx -- through "Unable to determine zone_id ... The error
+# from Cloudflare was: ...". Matching zone_id broadly would call a Cloudflare
+# outage permanent and skip the ladder.
+classifier="$(sed -n '/^certbot_failure_is_permanent()/,/^}/p' "$PUBLIC_CERT")"
+for pattern in 'error determining zone_id: (6003|9103|9109) ' \
+               'please confirm that the domain name has been entered correctly' \
+               'too many (certificates|registrations)'; do
+    grep -Fq "$pattern" <<<"$classifier" \
+        || fail "permanent certbot classification omits a known-permanent signature: $pattern"
+done
+for antipattern in 'the error from cloudflare was' 'failed authorizations' 'ratelimited'; do
+    grep -Fiq "$antipattern" <<<"$classifier" \
+        && fail "permanent certbot classification sweeps in a transient signature: $antipattern"
+done
+pass "the classifier keeps Cloudflare API and hourly-limit failures transient"
+
+retry_ladder="$(sed -n '/^bootstrap_public_certificate()/,/^}/p' "$ENTRYPOINT")"
+grep -Fq '[[ "$rc" == 75 ]] || return "$rc"' <<<"$retry_ladder" \
+    || fail "the entrypoint retry ladder no longer restricts itself to code 75"
+
+deps_ok=1
+for tool in diffutils mawk; do
+    grep -Eq "^[[:space:]]+$tool \\\\$" "$DOCKERFILE" \
+        || { fail "Dockerfile does not install a load-bearing bootstrap tool: $tool"; deps_ok=0; }
+done
+[[ "$deps_ok" == 1 ]] && pass "cmp and awk are declared image dependencies"
+
+# The documented capture is image_id="$(build-candidate-image.sh ...)", so any
+# other writer on stdout silently corrupts the accepted image ID.
+build_stdout_writers="$(grep -cE '^(bash docker/prepare-components\.sh|docker load) ' "$CANDIDATE_BUILD" || true)"
+if grep -Fq 'bash docker/prepare-components.sh >&2' "$CANDIDATE_BUILD" \
+   && grep -Fq 'docker load --input "$archive" >&2' "$CANDIDATE_BUILD" \
+   && [[ "$(grep -c "docker image inspect --format '{{.Id}}'" "$CANDIDATE_BUILD")" == 1 ]]; then
+    pass "the candidate build prints only the image ID on stdout"
+else
+    fail "the candidate build leaks progress output into the captured image ID"
+fi
+if grep -Fq 'docker buildx rm "$BUILDER" >/dev/null 2>&1 || true' "$CANDIDATE_BUILD"; then
+    pass "candidate build cleanup cannot abort under errexit"
+else
+    fail "a failing builder removal can abort cleanup and fail a good build"
+fi
 
 exit "$FAIL"
