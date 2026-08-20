@@ -20,8 +20,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # buildx rejects a builder name that does not start with a letter, so this
 # cannot be "5gpn-release-builder" the way the rest of the project names things.
 BUILDER=fivegpn-release-builder
-BUILDKIT_IMAGE='moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8'
+BUILDKIT_DIGEST=sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+BUILDKIT_IMAGE="moby/buildkit:v0.32.2@${BUILDKIT_DIGEST}"
 EXPECTED_LABEL_ARGS=20
+
+# Optional Docker Hub pull-through mirror, for acceptance hosts that cannot
+# reach registry-1.docker.io. This CANNOT change the built image: the BuildKit
+# driver image, the Dockerfile frontend, and the base image are all pinned by
+# digest, so a mirror either serves those exact bytes or the pull fails. It only
+# changes where the bytes come from. Leave it unset -- as hosted CI does -- and
+# every command below is byte-identical to the unmirrored form.
+REGISTRY_MIRROR="${FIVEGPN_BUILD_REGISTRY_MIRROR:-}"
 
 # Exactly the paths whose mtimes reach the image. Keep this list identical to
 # the build context the Dockerfile consumes; a path added to the image without
@@ -123,6 +132,7 @@ for input in "${CONTEXT_INPUTS[@]}"; do
 done
 
 archive="$(mktemp "${TMPDIR:-/tmp}/5gpn-release-candidate.XXXXXX.tar")"
+buildkit_config=""
 builder_started=0
 cleanup() {
     # `|| true` is required even here: the trap runs under errexit, so a failing
@@ -132,6 +142,7 @@ cleanup() {
         docker buildx rm "$BUILDER" >/dev/null 2>&1 || true
     fi
     rm -f -- "$archive"
+    [[ -n "$buildkit_config" ]] && rm -f -- "$buildkit_config"
     return 0
 }
 trap cleanup EXIT
@@ -139,10 +150,21 @@ trap cleanup EXIT
 # A dedicated container-driver builder pinned by digest. The default builder is
 # deliberately left alone: `--builder` selects it per invocation, so this never
 # mutates the caller's buildx context.
-docker buildx create \
-    --name "$BUILDER" \
-    --driver docker-container \
-    --driver-opt "image=${BUILDKIT_IMAGE}" >/dev/null
+create_args=(--name "$BUILDER" --driver docker-container)
+if [[ -n "$REGISTRY_MIRROR" ]]; then
+    # The daemon pulls the driver image, and BuildKit -- which has its own
+    # registry configuration, separate from the daemon's -- pulls the frontend
+    # and the base image. Both have to be pointed at the mirror. The digest is
+    # unchanged and still enforced in both cases.
+    echo "build-candidate-image: pulling through mirror ${REGISTRY_MIRROR}" >&2
+    buildkit_config="$(mktemp "${TMPDIR:-/tmp}/5gpn-buildkitd.XXXXXX.toml")"
+    printf '[registry."docker.io"]\n  mirrors = ["%s"]\n' "$REGISTRY_MIRROR" > "$buildkit_config"
+    create_args+=(--driver-opt "image=${REGISTRY_MIRROR}/moby/buildkit@${BUILDKIT_DIGEST}")
+    create_args+=(--config "$buildkit_config")
+else
+    create_args+=(--driver-opt "image=${BUILDKIT_IMAGE}")
+fi
+docker buildx create "${create_args[@]}" >/dev/null
 builder_started=1
 docker buildx inspect --bootstrap "$BUILDER" >/dev/null
 

@@ -299,13 +299,25 @@ fi
 if grep -Fq "grep -Fxq 'MIHOMO_SOURCE=pinned-release'" "$CANDIDATE_BUILD" \
    && grep -Fq 'MIHOMO_CONTAINER_CONTRACT=5gpn-container-runtime-v2' "$CANDIDATE_BUILD" \
    && grep -Fq 'touch -h -d "@${source_epoch}"' "$CANDIDATE_BUILD" \
-   && grep -Fq 'moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "$CANDIDATE_BUILD" \
+   && grep -Fq 'BUILDKIT_DIGEST=sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "$CANDIDATE_BUILD" \
    && grep -Fq 'rewrite-timestamp=true' "$CANDIDATE_BUILD" \
    && grep -Fq 'VERSION=${RELEASE_TAG}' "$CANDIDATE_BUILD" \
    && grep -Fq 'git status --porcelain' "$CANDIDATE_BUILD"; then
     pass "the candidate build pins its frontend, epoch, tag, and clean checkout"
 else
     fail "the candidate build lost a reproducibility input"
+fi
+
+# The optional pull-through mirror must never become a way to fetch different
+# bytes: both the driver image and BuildKit's own registry config keep the same
+# pinned digest, and an unset mirror must leave the command line untouched.
+if grep -Fq 'image=${REGISTRY_MIRROR}/moby/buildkit@${BUILDKIT_DIGEST}' "$CANDIDATE_BUILD" \
+   && grep -Fq 'image=${BUILDKIT_IMAGE}' "$CANDIDATE_BUILD" \
+   && grep -Fq 'REGISTRY_MIRROR="${FIVEGPN_BUILD_REGISTRY_MIRROR:-}"' "$CANDIDATE_BUILD" \
+   && ! grep -Fq 'FIVEGPN_BUILD_REGISTRY_MIRROR' "$RELEASE"; then
+    pass "the optional registry mirror stays digest-pinned and out of the release job"
+else
+    fail "the registry mirror can change which bytes the candidate build consumes"
 fi
 
 ACCEPTANCE="$ROOT/tests/container-acceptance.sh"
