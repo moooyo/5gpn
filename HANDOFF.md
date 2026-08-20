@@ -13,8 +13,8 @@ remaining delivery work.
 | Scope | Branch or source | Recovered commit | Relationship now |
 |---|---|---|---|
 | Root installer and Docker assembly | `moooyo/5gpn:codex/docker-runtime` | `ca25ff750612d923d4a0ed865be31f481cde262f` | Superseded. The branch tip has absorbed the maintenance merge and the pin update; it is ahead of `origin/main` and not behind it. |
-| Container-aware runtime | `moooyo/mihomo:codex/docker-runtime` | `9b7295f625c38dbcbfe171da364501ffab0eae95` | Integrated. Merged into `feat/5gpn-monolith` at `9497ae63` and released as `v1.19.30-monolith.34`. |
-| Console | `moooyo/zashboard:feat/5gpn-console` | no Docker-only patch | Released as `v3.21.0-monolith.34` with the deployment-neutral setup wording, paired with the Core in `release/pins.env`. |
+| Container-aware runtime | `moooyo/mihomo:codex/docker-runtime` | `9b7295f625c38dbcbfe171da364501ffab0eae95` | Integrated. Merged into `feat/5gpn-monolith` at `9497ae63` and released at the coordinate now pinned in `release/pins.env`. |
+| Console | `moooyo/zashboard:feat/5gpn-console` | no Docker-only patch | Released with the deployment-neutral setup wording, paired with the Core in `release/pins.env`. |
 | Extensions | `moooyo/5gpn-extensions:main` | no Docker-only patch | Acceptance inputs must use an immutable reviewed revision and digest. |
 
 The root Docker branch introduced the single-image delivery in `5da2c6c` and
@@ -117,11 +117,11 @@ tag.
 ## Release blockers and required order
 
 Steps 1-4 below are complete as of `c420626`. The Mihomo maintenance
-integration merged into `feat/5gpn-monolith` (`9497ae63`) and shipped as
-`v1.19.30-monolith.34`; Zashboard shipped the deployment-neutral wording as
-`v3.21.0-monolith.34`; both are immutable published releases and both
-coordinates and digests are recorded in `release/pins.env` and the notice
-table. The pin pair is therefore no longer a blocker.
+integration merged into `feat/5gpn-monolith` (`9497ae63`) and shipped as an
+immutable release; Zashboard shipped the deployment-neutral wording the same
+way; both coordinates and digests are recorded in `release/pins.env` and the
+notice table, which are the only files permitted to name them. The pin pair is
+therefore no longer a blocker.
 
 The surviving blocker is evidence. No exact image has passed release-mode
 acceptance, so `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
@@ -135,7 +135,7 @@ rejects every tag.
 2. ~~Run the proportional Mihomo build, race, vet, and acceptance gates remotely
    on `test-env`; do not run them locally.~~ Done for the tagged release.
 3. ~~Publish immutable container-capable Mihomo and deployment-neutral Zashboard
-   releases.~~ Done: `v1.19.30-monolith.34` and `v3.21.0-monolith.34`.
+   releases.~~ Done; the exact coordinates live in `release/pins.env`.
 4. ~~Update their paired coordinates in `release/pins.env` and the
    human-readable notice table.~~ Done at `c420626`.
 5. Run the full root shell, pin, image, and container-policy gates remotely.

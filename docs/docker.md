@@ -8,10 +8,11 @@ Console, Telegram, and native extensions are not split into sidecars.
 
 The merged root implementation requires the exact offline Core handshake
 `5gpn-container-runtime-v2`. `release/pins.env` now names a container-capable
-pair that satisfies it: Core `v1.19.30-monolith.34`, whose published binary
-answers the handshake, and Console `v3.21.0-monolith.34`, which carries the
-deployment-neutral setup wording. Both are immutable published releases and
-their digests are bound in the pin manifest.
+pair that satisfies it: the pinned Core's published binary answers the
+handshake, and the pinned Console carries the deployment-neutral setup wording.
+Both are immutable published releases and their digests are bound in the pin
+manifest. `release/pins.env` and `THIRD_PARTY_NOTICES.md` are the only places
+that name the exact coordinates.
 
 What still fails closed is the acceptance evidence. No exact image has passed
 release-mode acceptance, so the three `FIVEGPN_CONTAINER_ACCEPTED_*` repository

@@ -164,8 +164,8 @@ Recorded 2026-08-09, updated 2026-08-21.**
   installer, container-runtime-v2 contract, centralized pin manifest, durable
   UI volume, and acceptance-safety changes landed. That evidence is historical
   and cannot authorize publication of the merged result. The container-capable
-  pair is now recorded in `release/pins.env` — Core `v1.19.30-monolith.34`
-  answers the runtime-v2 handshake and Console `v3.21.0-monolith.34` carries the
+  pair is now recorded in `release/pins.env` — the pinned Core answers the
+  runtime-v2 handshake and the pinned Console carries the
   deployment-neutral wording — so publication now waits only on the exact merged
   image passing fresh release-mode acceptance and the three
   `FIVEGPN_CONTAINER_ACCEPTED_*` variables recording that run.

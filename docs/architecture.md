@@ -1357,9 +1357,9 @@ No hosted-runner fallback or historical development result may satisfy these
 coordinates.
 
 The merged root implementation requires runtime-v2, and `release/pins.env` now
-records a pair that provides it: Core `v1.19.30-monolith.34` answers the
-handshake and Console `v3.21.0-monolith.34` carries the deployment-neutral
-setup wording, both as immutable published releases. The gate nonetheless
-remains closed because no exact image has passed release-mode acceptance and
-the three `FIVEGPN_CONTAINER_ACCEPTED_*` variables are unset. Until that run
-exists and records them, the Docker release gate is expected to fail closed.
+records a pair that provides it: the pinned Core answers the handshake and the
+pinned Console carries the deployment-neutral setup wording, both as immutable
+published releases. The gate nonetheless remains closed because no exact image
+has passed release-mode acceptance and the three
+`FIVEGPN_CONTAINER_ACCEPTED_*` variables are unset. Until that run exists and
+records them, the Docker release gate is expected to fail closed.
