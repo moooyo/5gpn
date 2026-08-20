@@ -467,5 +467,11 @@ if grep -Fq 'docker buildx rm "$BUILDER" >/dev/null 2>&1 || true' "$CANDIDATE_BU
 else
     fail "a failing builder removal can abort cleanup and fail a good build"
 fi
+# buildx refuses a builder name that does not start with a letter.
+if grep -Eq '^BUILDER=[A-Za-z][A-Za-z0-9._-]*$' "$CANDIDATE_BUILD"; then
+    pass "the buildx builder name is one buildx will accept"
+else
+    fail "the buildx builder name is rejected by docker buildx create"
+fi
 
 exit "$FAIL"
