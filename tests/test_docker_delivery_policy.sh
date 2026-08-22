@@ -464,6 +464,22 @@ for tool in diffutils mawk; do
 done
 [[ "$deps_ok" == 1 ]] && pass "cmp and awk are declared image dependencies"
 
+# Reproducibility is a release gate, not a nicety: release.yml rebuilds the image
+# and refuses to publish unless the ID matches the accepted one. ldconfig's
+# aux-cache embeds inode numbers and scan timestamps and was the single file that
+# made two builds of one commit differ. /etc/ssl/certs must also stay traversable
+# or APT's unprivileged _apt user cannot read the pinned CA bundle.
+if grep -Fq 'rm -f /var/cache/ldconfig/aux-cache' "$DOCKERFILE"; then
+    pass "the nondeterministic ldconfig aux-cache is removed in its own layer"
+else
+    fail "ldconfig aux-cache survives and makes the image ID unreproducible"
+fi
+if grep -Fq 'chmod 0755 /etc/ssl /etc/ssl/certs' "$DOCKERFILE"; then
+    pass "the bootstrap CA directory is traversable by APT"
+else
+    fail "APT cannot read the pinned CA bundle through a non-traversable directory"
+fi
+
 # The documented capture is image_id="$(build-candidate-image.sh ...)", so any
 # other writer on stdout silently corrupts the accepted image ID.
 build_stdout_writers="$(grep -cE '^(bash docker/prepare-components\.sh|docker load) ' "$CANDIDATE_BUILD" || true)"

@@ -35,6 +35,12 @@ COPY --chmod=0644 docker/build/components/bootstrap-ca.pem /etc/ssl/certs/ca-cer
 # GitHub release assets are intentionally absent from this layer. They must
 # already exist below docker/build/components after release/pins.env has been
 # parsed by release/pins.sh and checked by docker/prepare-components.sh.
+#
+# The cleanup at the end of this RUN is load-bearing for reproducibility, not
+# just for size. ldconfig's /var/cache/ldconfig/aux-cache records inode numbers
+# and scan timestamps, so it differs on every build; it was the sole reason two
+# builds of this commit produced different image IDs, and the release gate
+# refuses to publish unless its rebuild reproduces the accepted ID exactly.
 RUN printf '%s\n' \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie-updates main" \
@@ -65,6 +71,7 @@ RUN printf '%s\n' \
         util-linux \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/apt/* \
     && rm -f /var/log/alternatives.log /var/log/dpkg.log \
+    && rm -f /var/cache/ldconfig/aux-cache \
     && groupadd --gid 10001 fivegpn \
     && useradd --uid 10001 --gid 10001 --home-dir /nonexistent \
         --no-create-home --shell /usr/sbin/nologin fivegpn \
