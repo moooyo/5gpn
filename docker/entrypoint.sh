@@ -344,8 +344,15 @@ validate_bootstrap_values() {
     valid_ipv4 "$DNS_GATEWAY_IP" || fatal "DNS_GATEWAY_IP must be an IPv4 address."
     valid_ipv4 "$DNS_PUBLIC_IP" || fatal "DNS_PUBLIC_IP must be an IPv4 address."
     valid_email "$CERT_EMAIL" || fatal "CERT_EMAIL is invalid."
-    [[ "$CERT_MODE" == cloudflare ]] \
-        || fatal "Docker supports only CERT_MODE=cloudflare."
+    # cloudflare is the only mode that produces publicly trusted certificates,
+    # and the only mode a release-mode acceptance run may use. debug issues a
+    # self-signed wildcard instead, which makes every path downstream of
+    # certificate issuance -- UI generation, certificate-role publication, and
+    # PID 1 itself -- reachable without spending a Let's Encrypt order. A debug
+    # lineage commits a distinct ready marker, so a volume bootstrapped this way
+    # can never satisfy the release acceptance fingerprint.
+    [[ "$CERT_MODE" == cloudflare || "$CERT_MODE" == debug ]] \
+        || fatal "Docker supports only CERT_MODE=cloudflare or CERT_MODE=debug."
     DNS_MIHOMO_LISTEN_IPS="$DOCKER_LISTEN_IP"
     CONSOLE_DOMAIN="console.${DNS_BASE_DOMAIN}"
     DOT_DOMAIN="dot.${DNS_BASE_DOMAIN}"
@@ -394,7 +401,7 @@ load_persisted_dns_env() {
        && "$(dns_env_get DNS_PUBLIC_IP)" == "$DNS_PUBLIC_IP" \
        && "$(dns_env_get DNS_GATEWAY_IP)" == "$DNS_GATEWAY_IP" \
        && "$(dns_env_get DNS_MIHOMO_LISTEN_IPS)" == "$DNS_MIHOMO_LISTEN_IPS" \
-       && "$(dns_env_get CERT_MODE)" == cloudflare \
+       && "$(dns_env_get CERT_MODE)" == "$CERT_MODE" \
        && "$(dns_env_get CERT_EMAIL)" == "$CERT_EMAIL" ]] \
         || fatal "Bootstrap coordinates conflict with the persisted Docker dns.env."
     PERSISTED_DNS_ENV=1
@@ -820,7 +827,7 @@ DNS_BASE_DOMAIN=${DNS_BASE_DOMAIN}
 DNS_PUBLIC_IP=${DNS_PUBLIC_IP}
 DNS_GATEWAY_IP=${DNS_GATEWAY_IP}
 DNS_MIHOMO_LISTEN_IPS=${DNS_MIHOMO_LISTEN_IPS}
-CERT_MODE=cloudflare
+CERT_MODE=${CERT_MODE}
 CERT_EMAIL=${CERT_EMAIL}
 EOF
     chmod 0600 "$candidate"
@@ -955,14 +962,22 @@ main() {
     validate_existing_dns_coordinates
     repair_existing_file_durability
     preflight_certificate_state
-    prepare_cloudflare_credential
+    # debug issues its wildcard locally and never reads a Cloudflare token, so
+    # requiring the secret would make the mode unusable for its whole purpose.
+    if [[ "$CERT_MODE" == cloudflare ]]; then
+        prepare_cloudflare_credential
+    fi
     scrub_config_candidates
     scrub_publication_candidates
 
     info "Initializing the Docker interception CA."
     run_sync "$INTERCEPT_CERT_HELPER" init-ca \
         || fatal "Docker interception CA initialization failed."
-    info "Bootstrapping the Cloudflare public certificate."
+    if [[ "$CERT_MODE" == debug ]]; then
+        info "Issuing the self-signed debug public certificate (NOT publicly trusted)."
+    else
+        info "Bootstrapping the Cloudflare public certificate."
+    fi
     bootstrap_public_certificate \
         || fatal "Docker public certificate bootstrap failed."
 

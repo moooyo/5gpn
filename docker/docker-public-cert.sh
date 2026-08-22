@@ -1,5 +1,20 @@
 #!/bin/bash -p
-# Cloudflare-only public certificate lifecycle for the single-container runtime.
+# Public certificate lifecycle for the single-container runtime.
+#
+# Two modes. cloudflare is the product mode: a real Let's Encrypt DNS-01
+# wildcard, publicly trusted, managed by Certbot in its own lineage tree. debug
+# is a test mode: one self-signed wildcard written straight into the live
+# lineage directory, with no Certbot, no archive, no renewal conf, and no
+# network. Its purpose is to make everything downstream of certificate issuance
+# reachable without spending a Let's Encrypt order.
+#
+# debug deliberately relaxes exactly three cloudflare checks -- the Cloudflare
+# credential, the Certbot lineage layout, and public chain trust -- and nothing
+# else. Every relaxation below is gated on cert_mode_is_debug, so the cloudflare
+# path is byte-for-byte the same as before this mode existed. A debug lineage
+# commits DEBUG_LINEAGE_READY_VALUE_PREFIX rather than the release prefix, so a
+# debug volume fails the release acceptance fingerprint by construction and can
+# never be mistaken for an accepted one.
 # This helper always runs as the same fixed fivegpn UID/GID as 5gpn-mihomo.
 set +x +v
 set -euo pipefail
@@ -49,11 +64,22 @@ LE_MARKER=.5gpn-docker-letsencrypt-owned
 LE_MARKER_VALUE=5gpn-docker-letsencrypt-v1
 LINEAGE_READY_MARKER=.5gpn-docker-lineage-ready
 LINEAGE_READY_VALUE_PREFIX=5gpn-docker-lineage-ready-v1
+# A debug lineage is committed under its own prefix. tests/container-acceptance.sh
+# compares the marker against the release prefix verbatim, so this single value
+# is what makes a self-signed volume fail acceptance without acceptance needing
+# to know that debug mode exists.
+DEBUG_LINEAGE_READY_VALUE_PREFIX=5gpn-docker-lineage-debug-v1
 LINEAGE_READY_CANDIDATE=.5gpn-docker-lineage-ready.new
 UI_HELPER_LOADED=0
 CERT_ROLE_HELPERS_LOADED=0
 CERTBOT_FAILURE_CLASS=transient
 LIVE_GENERATION=""
+# Set by load_configuration from the bound bootstrap configuration. Never
+# inferred from persistent state, so an existing volume cannot silently change
+# the mode a run operates in.
+CERT_MODE_ACTIVE=cloudflare
+# The host installer's debug wildcard uses the same 825-day validity.
+SELFSIGNED_VALIDITY_DAYS=825
 declare -a COMPLETE_ARCHIVE_GENERATIONS=()
 
 info() { printf '[INFO] %s\n' "$*"; }
@@ -172,7 +198,8 @@ load_configuration() {
     valid_domain "$BASE_DOMAIN" || return 1
     mode="$(config_get CERT_MODE 2>/dev/null || true)"
     [[ -n "$mode" ]] || mode=cloudflare
-    [[ "$mode" == cloudflare ]] || return 1
+    [[ "$mode" == cloudflare || "$mode" == debug ]] || return 1
+    CERT_MODE_ACTIVE="$mode"
     CERT_EMAIL="$(config_get CERT_EMAIL)" || return 1
     [[ "$CERT_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ \
        && "$CERT_EMAIL" != -* \
@@ -184,8 +211,24 @@ load_configuration() {
     valid_domain "$DOT_DOMAIN" && valid_domain "$CONSOLE_DOMAIN"
 }
 
+cert_mode_is_debug() {
+    [[ "$CERT_MODE_ACTIVE" == debug ]]
+}
+
+# The committed marker value, and therefore the release-acceptance verdict, is
+# decided here and nowhere else.
+lineage_ready_value() {
+    if cert_mode_is_debug; then
+        printf '%s:%s\n' "$DEBUG_LINEAGE_READY_VALUE_PREFIX" "$BASE_DOMAIN"
+    else
+        printf '%s:%s\n' "$LINEAGE_READY_VALUE_PREFIX" "$BASE_DOMAIN"
+    fi
+}
+
 credential_safe() {
     local line count
+    # debug never reads a Cloudflare token, and the container never stages one.
+    cert_mode_is_debug && return 0
     owned_plain_file "$CF_CREDENTIAL" 600 || return 1
     count="$(wc -l < "$CF_CREDENTIAL" | tr -d '[:space:]')"
     [[ "$count" == 1 ]] || return 1
@@ -443,6 +486,19 @@ validate_live_cert_pair() {
         && cert_chain_trusted "$live/cert.pem" "$live/chain.pem"
 }
 
+# The pair the certificate-role publisher is about to take. cloudflare demands
+# public chain trust; debug demands a valid self-signature instead. Nothing else
+# differs, so both modes publish through the identical role transaction.
+live_pair_publishable() {
+    local live="$LE_LIVE_ROOT/$BASE_DOMAIN"
+    if cert_mode_is_debug; then
+        validate_role_pair "$live/fullchain.pem" "$live/privkey.pem" 0 \
+            && selfsigned_cert_verifies "$live/cert.pem"
+        return
+    fi
+    validate_live_cert_pair "$live" 0
+}
+
 archive_generation_structurally_safe() {
     local number="$1" archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN"
     local combined_digest fullchain_digest
@@ -616,6 +672,14 @@ ready_lineage_is_recoverable_read_only() {
     local live="$LE_LIVE_ROOT/$BASE_DOMAIN" archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN"
     local generation best=0 entry
     local -a entries=()
+    # A debug lineage has no archive to recover from and no Certbot residue to
+    # classify: the four live files either are a valid self-signed set or they
+    # are not. Expiry is tolerated here, exactly as it is for cloudflare, so
+    # that the bootstrap transaction can reissue rather than refuse to start.
+    if cert_mode_is_debug; then
+        lineage_ready_safe && debug_lineage_safe 0
+        return
+    fi
     lineage_ready_safe \
         && lineage_set_is_exclusive \
         && renewal_conf_safe \
@@ -723,11 +787,114 @@ reset_unpublished_partial_lineage() {
 
 live_lineage_safe() {
     local live="$LE_LIVE_ROOT/$BASE_DOMAIN"
+    if cert_mode_is_debug; then
+        debug_lineage_safe
+        return
+    fi
     lineage_set_is_exclusive \
         && renewal_conf_safe \
         && recover_live_lineage \
         && archive_lineage_safe \
         && validate_live_cert_pair "$live" 0
+}
+
+# The debug wildcard is its own trust anchor: `openssl req -x509` with the
+# explicit CA:TRUE basic constraint below emits a self-signed certificate, so it
+# must verify against itself and against nothing else. Public chain trust is the
+# one property debug mode cannot have, which is exactly why it is test-only.
+selfsigned_cert_verifies() {
+    local cert="$1" check_time="${2:-1}"
+    local -a args=(verify -CAfile "$cert")
+    [[ "$check_time" == 1 ]] || args+=(-no_check_time)
+    openssl "${args[@]}" "$cert" >/dev/null 2>&1
+}
+
+# A debug lineage is exactly four regular files in the live directory. There is
+# no Certbot archive, no renewal conf, and no symlink anywhere in it, so none of
+# the Certbot-shaped recovery machinery applies or is allowed to find anything.
+#
+# require_current=1 additionally demands an unexpired certificate. The structure
+# variant deliberately tolerates expiry, because the renewal path has to be able
+# to inspect a lineage precisely when it has run out.
+debug_lineage_safe() {
+    local require_current="${1:-1}"
+    local live="$LE_LIVE_ROOT/$BASE_DOMAIN" entry name
+    local -a entries=()
+    lineage_set_is_exclusive || return 1
+    [[ ! -e "$LE_ARCHIVE_ROOT/$BASE_DOMAIN" \
+       && ! -L "$LE_ARCHIVE_ROOT/$BASE_DOMAIN" ]] || return 1
+    [[ ! -e "$LE_RENEWAL_ROOT/${BASE_DOMAIN}.conf" \
+       && ! -L "$LE_RENEWAL_ROOT/${BASE_DOMAIN}.conf" ]] || return 1
+    owned_directory "$live" 700 || return 1
+    directory_entries "$live" entries || return 1
+    [[ "${#entries[@]}" == 4 ]] || return 1
+    for entry in "${entries[@]}"; do
+        name="$(basename -- "$entry")"
+        case "$name" in
+            privkey.pem) owned_plain_file "$entry" 600 || return 1 ;;
+            cert.pem|chain.pem|fullchain.pem) owned_plain_file "$entry" 644 || return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+    # Self-signed means there are no intermediates, so the chain is empty and
+    # the full chain is the leaf alone.
+    [[ ! -s "$live/chain.pem" ]] || return 1
+    cmp -s -- "$live/cert.pem" "$live/fullchain.pem" || return 1
+    if [[ "$require_current" == 1 ]]; then
+        validate_role_pair "$live/fullchain.pem" "$live/privkey.pem" 0 || return 1
+    else
+        openssl x509 -in "$live/fullchain.pem" -noout >/dev/null 2>&1 \
+            && certificate_sans_are_exact "$live/fullchain.pem" \
+            && keypair_matches "$live/fullchain.pem" "$live/privkey.pem" \
+            || return 1
+    fi
+    selfsigned_cert_verifies "$live/cert.pem" "$require_current"
+}
+
+# Writes one complete self-signed lineage. The SAN set is exactly the apex and
+# its wildcard: certificate_sans_are_exact rejects anything else, including the
+# gateway and public IP SANs the host installer's debug certificate carries.
+issue_selfsigned_lineage() {
+    local live="$LE_LIVE_ROOT/$BASE_DOMAIN" stage name
+    mkdir -p -- "$LE_LIVE_ROOT" || return 1
+    chmod 0700 -- "$LE_LIVE_ROOT" || return 1
+    owned_directory "$LE_LIVE_ROOT" 700 || return 1
+    stage="$(mktemp -d "${TMPDIR}/5gpn-selfsigned.XXXXXX")" || return 1
+    chmod 0700 -- "$stage" || { rm -rf -- "$stage"; return 1; }
+    if ! openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+            -days "$SELFSIGNED_VALIDITY_DAYS" \
+            -subj "/CN=${BASE_DOMAIN}" \
+            -addext "subjectAltName=DNS:${BASE_DOMAIN},DNS:*.${BASE_DOMAIN}" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign" \
+            -addext "extendedKeyUsage=serverAuth" \
+            -keyout "$stage/privkey.pem" -out "$stage/cert.pem" >/dev/null 2>&1; then
+        rm -rf -- "$stage"
+        err "Self-signed debug wildcard generation failed."
+        return 1
+    fi
+    : > "$stage/chain.pem" || { rm -rf -- "$stage"; return 1; }
+    cp -- "$stage/cert.pem" "$stage/fullchain.pem" || { rm -rf -- "$stage"; return 1; }
+    chmod 0600 -- "$stage/privkey.pem" || { rm -rf -- "$stage"; return 1; }
+    chmod 0644 -- "$stage/cert.pem" "$stage/chain.pem" "$stage/fullchain.pem" \
+        || { rm -rf -- "$stage"; return 1; }
+    # Only ever replace a directory this helper owns, never an arbitrary path.
+    if [[ -e "$live" || -L "$live" ]]; then
+        canonical_directory "$live" \
+            && [[ "$(path_uid "$live")" == "$EUID" \
+               && "$(path_gid "$live")" == "$CURRENT_GID" ]] \
+            || { rm -rf -- "$stage"; err "Refusing to replace an unowned debug lineage."; return 1; }
+        rm -rf -- "$live" || { rm -rf -- "$stage"; return 1; }
+    fi
+    mkdir -p -- "$live" || { rm -rf -- "$stage"; return 1; }
+    chmod 0700 -- "$live" || { rm -rf -- "$stage"; return 1; }
+    for name in cert.pem chain.pem fullchain.pem privkey.pem; do
+        cp -p -- "$stage/$name" "$live/$name" || { rm -rf -- "$stage"; return 1; }
+        fsync_file "$live/$name" || { rm -rf -- "$stage"; return 1; }
+    done
+    rm -rf -- "$stage" || return 1
+    fsync_directory "$live" && fsync_directory "$LE_LIVE_ROOT" || return 1
+    debug_lineage_safe
 }
 
 lineage_artifacts_exist() {
@@ -742,7 +909,7 @@ lineage_ready_exists() {
 
 lineage_ready_safe() {
 	owned_exact_line_file "$LE_ROOT/$LINEAGE_READY_MARKER" 600 \
-		"${LINEAGE_READY_VALUE_PREFIX}:${BASE_DOMAIN}"
+		"$(lineage_ready_value)"
 }
 
 commit_lineage_ready() {
@@ -755,7 +922,7 @@ commit_lineage_ready() {
         owned_plain_file "$candidate" 600 || return 1
         rm -f -- "$candidate" || return 1
     fi
-    printf '%s\n' "${LINEAGE_READY_VALUE_PREFIX}:${BASE_DOMAIN}" > "$candidate" || return 1
+    printf '%s\n' "$(lineage_ready_value)" > "$candidate" || return 1
     chmod 0600 "$candidate" \
         && owned_plain_file "$candidate" 600 \
         && fsync_file "$candidate" \
@@ -766,6 +933,10 @@ commit_lineage_ready() {
 
 lineage_structure_safe() {
     local live="$LE_LIVE_ROOT/$BASE_DOMAIN"
+    if cert_mode_is_debug; then
+        debug_lineage_safe 0
+        return
+    fi
     lineage_set_is_exclusive \
         && renewal_conf_safe \
         && recover_live_lineage \
@@ -845,7 +1016,7 @@ validate_shared_role_candidate() {
 publish_roles() {
     local live="$LE_LIVE_ROOT/$BASE_DOMAIN"
     _ROLES_CHANGED=0
-    validate_live_cert_pair "$live" 0 || return 1
+    live_pair_publishable || return 1
     load_cert_role_helpers || return 1
     cert_role_ctl_tree_is_recoverable \
         && cert_role_ctl_repair_recoverable_tree \
@@ -1162,27 +1333,40 @@ bootstrap_public_certificate() {
         ready=1
     fi
     if ! live_lineage_safe; then
-        if lineage_artifacts_exist; then
-            if lineage_structure_safe; then
-                force=1
-            elif [[ "$ready" == 0 ]] && reset_unpublished_partial_lineage; then
-                info "Removed a safe unpublished partial first-boot Certbot lineage."
-            else
-                err "Existing Certbot lineage state is incomplete or unsafe."
+        if cert_mode_is_debug; then
+            # Same refusal as cloudflare: a lineage that was committed and has
+            # since gone missing is an operator problem, not something to
+            # silently paper over with a fresh certificate.
+            if [[ "$ready" == 1 ]] && ! lineage_artifacts_exist; then
+                err "The committed Docker lineage is missing; refusing silent replacement."
                 return 1
             fi
-        elif [[ "$ready" == 1 ]]; then
-            err "The committed Docker lineage is missing; refusing silent replacement."
-            return 1
-        fi
-        info "Obtaining the single Cloudflare DNS-01 lineage for ${BASE_DOMAIN}."
-        if ! run_certbot_bootstrap "$force"; then
-            if [[ "$CERTBOT_FAILURE_CLASS" == permanent ]]; then
-                err "Cloudflare DNS-01 certificate issuance failed permanently; retrying cannot help. Check the API token scope, the zone, and the Let's Encrypt rate limit, then recreate the container."
-                return 78
+            info "Issuing the self-signed debug wildcard for ${BASE_DOMAIN} (NOT publicly trusted)."
+            issue_selfsigned_lineage \
+                || { err "Self-signed debug wildcard issuance failed."; return 1; }
+        else
+            if lineage_artifacts_exist; then
+                if lineage_structure_safe; then
+                    force=1
+                elif [[ "$ready" == 0 ]] && reset_unpublished_partial_lineage; then
+                    info "Removed a safe unpublished partial first-boot Certbot lineage."
+                else
+                    err "Existing Certbot lineage state is incomplete or unsafe."
+                    return 1
+                fi
+            elif [[ "$ready" == 1 ]]; then
+                err "The committed Docker lineage is missing; refusing silent replacement."
+                return 1
             fi
-            err "Cloudflare DNS-01 certificate issuance failed transiently."
-            return 75
+            info "Obtaining the single Cloudflare DNS-01 lineage for ${BASE_DOMAIN}."
+            if ! run_certbot_bootstrap "$force"; then
+                if [[ "$CERTBOT_FAILURE_CLASS" == permanent ]]; then
+                    err "Cloudflare DNS-01 certificate issuance failed permanently; retrying cannot help. Check the API token scope, the zone, and the Let's Encrypt rate limit, then recreate the container."
+                    return 78
+                fi
+                err "Cloudflare DNS-01 certificate issuance failed transiently."
+                return 75
+            fi
         fi
     fi
     live_lineage_safe \
@@ -1202,22 +1386,28 @@ renew_public_certificate() {
     # one complete replacement generation.
     FORCE_PROFILE_REFRESH=0
     ensure_layout && credential_safe && lineage_ready_safe && lineage_structure_safe \
-        || { err "The single Cloudflare lineage is missing or unsafe."; return 1; }
+        || { err "The single public certificate lineage is missing or unsafe."; return 1; }
     if ! openssl x509 -in "$cert" -noout -checkend "$RENEW_BEFORE_SECONDS" >/dev/null 2>&1; then
-        info "The public certificate is due; running the scoped Cloudflare renewal."
-        if ! run_certbot_renew; then
-            # The Core's certificate manager owns the retry cadence and its own
-            # bounded backoff, so this helper must return promptly rather than
-            # sleep. Only the diagnosis changes with the classification.
-            if [[ "$CERTBOT_FAILURE_CLASS" == permanent ]]; then
-                err "Scoped Cloudflare DNS-01 renewal failed permanently; retrying cannot help. Check the API token scope, the zone, and the Let's Encrypt rate limit."
-            else
-                err "Scoped Cloudflare DNS-01 renewal failed."
+        if cert_mode_is_debug; then
+            info "The self-signed debug wildcard is due; reissuing it locally."
+            issue_selfsigned_lineage \
+                || { err "Self-signed debug wildcard reissue failed."; return 1; }
+        else
+            info "The public certificate is due; running the scoped Cloudflare renewal."
+            if ! run_certbot_renew; then
+                # The Core's certificate manager owns the retry cadence and its own
+                # bounded backoff, so this helper must return promptly rather than
+                # sleep. Only the diagnosis changes with the classification.
+                if [[ "$CERTBOT_FAILURE_CLASS" == permanent ]]; then
+                    err "Scoped Cloudflare DNS-01 renewal failed permanently; retrying cannot help. Check the API token scope, the zone, and the Let's Encrypt rate limit."
+                else
+                    err "Scoped Cloudflare DNS-01 renewal failed."
+                fi
+                return 1
             fi
-            return 1
         fi
         openssl x509 -in "$cert" -noout -checkend "$RENEW_BEFORE_SECONDS" >/dev/null 2>&1 \
-            || { err "Certbot returned without a fresh valid exact-SAN lineage."; return 1; }
+            || { err "Renewal returned without a fresh valid exact-SAN lineage."; return 1; }
     fi
     live_lineage_safe \
         || { err "The current public lineage failed validity or system trust verification."; return 1; }

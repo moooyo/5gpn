@@ -186,7 +186,7 @@ if grep -Fq 'exec "$MIHOMO_BIN"' "$ENTRYPOINT" \
    && grep -Fq 'wait "$child_pid"' "$ENTRYPOINT" \
    && grep -Fq 'safe_private_input_file "$BOOTSTRAP_INPUT"' "$ENTRYPOINT" \
    && grep -Fq 'safe_private_input_file "$CF_SECRET"' "$ENTRYPOINT" \
-   && grep -Fq 'Docker supports only CERT_MODE=cloudflare.' "$ENTRYPOINT" \
+   && grep -Fq 'Docker supports only CERT_MODE=cloudflare or CERT_MODE=debug.' "$ENTRYPOINT" \
    && grep -Fq '5gpn-container-runtime-v2' "$ENTRYPOINT" \
    && grep -Fq '5gpn-state validate --owner-uid "$CURRENT_UID"' "$ENTRYPOINT" \
    && grep -Fq '5gpn-config inspect-controller' "$ENTRYPOINT" \
@@ -229,6 +229,30 @@ if grep -Fq 'exec "$MIHOMO_BIN"' "$ENTRYPOINT" \
     pass "entrypoint performs the current read-only preflight before any state or certificate publication"
 else
     fail "entrypoint bypasses the v2 state, controller, legacy, UI, or publication boundary"
+fi
+
+# CERT_MODE=debug exists so that UI generation, certificate-role publication,
+# and PID 1 are reachable without spending a Let's Encrypt order. It must stay
+# incapable of impersonating an accepted deployment: a debug lineage commits its
+# own ready-marker prefix, and tests/container-acceptance.sh compares that marker
+# against the release prefix verbatim. If these two strings ever converge, a
+# self-signed run could satisfy the release fingerprint and populate
+# FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID with an image that never proved DNS-01
+# issuance -- the exact undetectable false binding the release gate cannot catch.
+ACCEPTANCE="$ROOT/tests/container-acceptance.sh"
+DEBUG_MODE_PUBLIC_CERT="$ROOT/docker/docker-public-cert.sh"
+release_prefix='LINEAGE_READY_VALUE_PREFIX=5gpn-docker-lineage-ready-v1'
+debug_prefix='DEBUG_LINEAGE_READY_VALUE_PREFIX=5gpn-docker-lineage-debug-v1'
+if grep -Fxq "$release_prefix" "$DEBUG_MODE_PUBLIC_CERT" \
+   && grep -Fxq "$debug_prefix" "$DEBUG_MODE_PUBLIC_CERT" \
+   && grep -Fq '5gpn-docker-lineage-ready-v1:$base' "$ACCEPTANCE" \
+   && ! grep -Fq 'lineage-debug' "$ACCEPTANCE" \
+   && grep -Fq 'cert_mode_is_debug' "$DEBUG_MODE_PUBLIC_CERT" \
+   && ! grep -Fq 'certbot' <<<"$(sed -n '/^issue_selfsigned_lineage()/,/^}/p' "$DEBUG_MODE_PUBLIC_CERT")" \
+   && grep -Fq 'DNS:${BASE_DOMAIN},DNS:*.${BASE_DOMAIN}' "$DEBUG_MODE_PUBLIC_CERT"; then
+    pass "debug mode issues locally and cannot satisfy the release acceptance fingerprint"
+else
+    fail "debug and release lineage markers are not provably distinct"
 fi
 
 if command -v jq >/dev/null 2>&1 \

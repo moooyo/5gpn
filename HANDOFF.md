@@ -16,7 +16,8 @@ records only where the Docker delivery stands and what to do next.
 | Offline gates | Green on `test-env`: `bash -n` clean, 43/43 unprivileged suites, all three root-only suites under `sudo` with real assertions, and every pinned digest re-verified against its published release. |
 | Image build | Works, and is reproducible — two from-scratch builds of one commit, builder torn down and tree `git clean -xfd`ed in between, produced the identical image ID. |
 | Release acceptance | **Not run.** Blocked on operator-supplied certificate inputs, not on code. |
-| Published artifacts | None. No tag, no GitHub Release, no GHCR image has ever been published from this repository. |
+| Runtime, minus DNS-01 | **Verified** on `test-env` 2026-08-22 via `CERT_MODE=debug`. The container reaches PID 1 as `5gpn-mihomo`, publishes both certificate roles and a complete UI generation, and survives a restart reusing its lineage. Only real Cloudflare DNS-01 issuance remains unexercised. |
+| Published artifacts | None **for the Docker delivery**: no GHCR image and no Docker-bearing tag has ever been published. The host-installer release line is a separate, live line and has published through `0.0.81`; do not read this row as "the repository has never released anything." |
 
 **Next action:** supply the acceptance inputs described under step 7, then run
 steps 7-9. Everything before that is done.
@@ -46,6 +47,38 @@ The command prints the image ID on stdout and nothing else, so
 
 Then follow [`docs/docker.md`](docs/docker.md) for the container and the
 release-mode acceptance invocation.
+
+## What `CERT_MODE=debug` does and does not prove
+
+Added 2026-08-22. Docker now accepts `CERT_MODE=debug`, which issues one
+self-signed wildcard locally instead of a Cloudflare DNS-01 certificate: no API
+token, no network, no Let's Encrypt order. Its purpose is that everything
+downstream of certificate issuance had never been executed even once, because it
+all sits behind the one step that needs a real domain.
+
+Verified on `test-env` against a candidate image built from the change:
+
+- PID 1 is `5gpn-mihomo`; the container stays up with `RestartCount` 0.
+- Both certificate roles publish, and the served leaf carries exactly
+  `DNS:<base>` and `DNS:*.<base>` — the SAN set `certificate_sans_are_exact`
+  demands. Note the host installer's own debug certificate adds gateway and
+  public IP SANs and would therefore be **rejected** here.
+- `/opt/5gpn/ui/current` publishes a complete generation. Before this, the
+  `fivegpn-ui` volume contract had no executed evidence behind it at all.
+- A restart reuses the committed lineage rather than reissuing (same serial).
+- `CERT_MODE=cloudflare` still refuses to start without the token secret, with
+  its original message and exit code.
+
+What it does not prove, and must never be recorded as proving: Cloudflare DNS-01
+issuance, the Certbot lineage layout, renewal, or public chain trust. A debug
+lineage commits `5gpn-docker-lineage-debug-v1:<base>` while
+`tests/container-acceptance.sh` compares the marker against
+`5gpn-docker-lineage-ready-v1:<base>` verbatim, so a debug volume fails the
+release fingerprint by construction. `tests/test_docker_delivery_policy.sh`
+asserts those two strings stay distinct — if they ever converge, a self-signed
+run could populate `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` with an image that
+never issued a real certificate, which is precisely the undetectable false
+binding step 8 warns about.
 
 ## Release blockers and required order
 
