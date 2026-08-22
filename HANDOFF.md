@@ -4,26 +4,149 @@
 
 This file is a pickup record, not an architecture authority. Read
 [`AGENTS.md`](AGENTS.md), [`docs/architecture.md`](docs/architecture.md), and
-[`MEMORY.md`](MEMORY.md) first. Those documents define current behavior; this
-file records the recovered Docker work, the maintenance-line merge, and the
-remaining delivery work.
+[`MEMORY.md`](MEMORY.md) first — those define current behavior. This file
+records only where the Docker delivery stands and what to do next.
 
-## Recovered branch state
+## Current position
 
-| Scope | Branch or source | Recovered commit | Relationship now |
-|---|---|---|---|
-| Root installer and Docker assembly | `moooyo/5gpn:codex/docker-runtime` | `ca25ff750612d923d4a0ed865be31f481cde262f` | Superseded. The branch tip has absorbed the maintenance merge and the pin update; it is ahead of `origin/main` and not behind it. |
-| Container-aware runtime | `moooyo/mihomo:codex/docker-runtime` | `9b7295f625c38dbcbfe171da364501ffab0eae95` | Integrated. Merged into `feat/5gpn-monolith` at `9497ae63` and released at the coordinate now pinned in `release/pins.env`. |
-| Console | `moooyo/zashboard:feat/5gpn-console` | no Docker-only patch | Released with the deployment-neutral setup wording, paired with the Core in `release/pins.env`. |
-| Extensions | `moooyo/5gpn-extensions:main` | no Docker-only patch | Acceptance inputs must use an immutable reviewed revision and digest. |
+| | |
+|---|---|
+| Code | `main`, `beta`, and `codex/docker-runtime` are all fast-forwarded to the same commit. Confirm with `git rev-parse origin/main origin/beta origin/codex/docker-runtime`. |
+| Core and Console | Both released and pinned. `release/pins.env` and `THIRD_PARTY_NOTICES.md` are the only files allowed to name their coordinates. |
+| Offline gates | Green on `test-env`: `bash -n` clean, 43/43 unprivileged suites, all three root-only suites under `sudo` with real assertions, and every pinned digest re-verified against its published release. |
+| Image build | Works, and is reproducible — two from-scratch builds of one commit, builder torn down and tree `git clean -xfd`ed in between, produced the identical image ID. |
+| Release acceptance | **Not run.** Blocked on operator-supplied certificate inputs, not on code. |
+| Published artifacts | None. No tag, no GitHub Release, no GHCR image has ever been published from this repository. |
 
-The root Docker branch introduced the single-image delivery in `5da2c6c` and
-later recorded its pickup state in `ca25ff7`. The runtime branch introduced
-certificate reload support in `7370b743` and the managed container lifecycle in
-`9b7295f6`. Both Core and Console now have immutable releases; no Docker PR,
-tag, GitHub Release, or GHCR image has been published from the root repository.
+**Next action:** supply the acceptance inputs described under step 7, then run
+steps 7-9. Everything before that is done.
 
-## Valid design that survives the maintenance merge
+Do not treat any image ID quoted in this repository's history as acceptance
+evidence. `VERSION` and `VCS_REF` land in labels and therefore inside the image
+config digest, so the ID changes with every commit and every tag string. The
+only ID that counts is the one printed by the build of the exact commit that
+will be tagged, with the exact tag as `--tag`.
+
+## Resume here
+
+On the acceptance host, build the candidate:
+
+```bash
+cd ~/5gpn-release && git fetch origin && git checkout --detach <tagged-commit>
+git clean -xfd
+FIVEGPN_BUILD_REGISTRY_MIRROR=mirror.gcr.io \
+  bash docker/build-candidate-image.sh --tag <exact-future-tag>
+```
+
+`--tag` must be the tag that will actually be pushed; it is not cosmetic. The
+mirror variable is only needed where `registry-1.docker.io` is unreachable, and
+it cannot change the result — every reference it fetches stays digest-pinned.
+The command prints the image ID on stdout and nothing else, so
+`image_id="$(...)"` is safe.
+
+Then follow [`docs/docker.md`](docs/docker.md) for the container and the
+release-mode acceptance invocation.
+
+## Release blockers and required order
+
+Steps 1-6 are complete. The surviving blocker is evidence: no exact image has
+passed release-mode acceptance, so `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
+`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
+`FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` are unset and the publication gate
+rejects every tag.
+
+1. ~~Finish and review the Mihomo maintenance integration for the v2 container
+   lifecycle, cgroup layout, certificate manager, TLS reload, and orderly
+   shutdown.~~ Done: merged into `feat/5gpn-monolith` at `9497ae63`.
+2. ~~Run the proportional Mihomo build, race, vet, and acceptance gates remotely
+   on `test-env`.~~ Done for the tagged release.
+3. ~~Publish immutable container-capable Mihomo and deployment-neutral Zashboard
+   releases.~~ Done; the exact coordinates live in `release/pins.env`.
+4. ~~Update their paired coordinates in `release/pins.env` and the
+   human-readable notice table.~~ Done at `c420626`.
+5. ~~Run the full root shell, pin, image, and container-policy gates remotely.~~
+   Done on `test-env`. The macOS workstation cannot substitute: most suites need
+   bash 4+ and GNU coreutils, and `tests/test_cert_role_ctl.sh` exits zero there
+   while emitting no assertions at all, which reads as a pass.
+6. ~~Merge to `main` and build the exact reproducible image.~~ Done. Because
+   every merge was a fast-forward, the accepted commit and the tagged commit can
+   be the same object; keep it that way. Build only through
+   `docker/build-candidate-image.sh`, which the release workflow also calls, so
+   the two cannot drift.
+7. **BLOCKED — needs operator-supplied inputs.** Run
+   `tests/container-acceptance.sh` in release mode against that exact image on
+   the disposable Docker target.
+
+   `test-env` cannot supply the certificate inputs as it stands. Its host
+   installation uses `CERT_MODE=debug` under the reserved base domain
+   `5gpn.test`, holds no Cloudflare credential, and has no Let's Encrypt
+   lineage. Docker accepts only `CERT_MODE=cloudflare`. Development acceptance
+   mode does **not** route around this — it only remaps the published ports,
+   while the container still performs real Cloudflare DNS-01 issuance.
+
+   Before this step can run, provide:
+
+   - a real base domain whose DNS is hosted on Cloudflare;
+   - an API token scoped `Zone:DNS:Edit` for that zone, placed on the target as
+     a mode-0600 file;
+   - a controller secret at `FIVEGPN_CONTROLLER_SECRET_FILE` — a single-link
+     mode-0600 regular file of at most 4096 bytes holding one
+     16-to-512-character token;
+   - a candidate with zero installed extensions, or the extension probe aborts;
+   - acceptance that a production Let's Encrypt wildcard order will be spent.
+
+   The run is mutating: it stops, renames, and re-creates the container. Release
+   mode binds `0.0.0.0` on `853/80/443/8080/8443`, so any host gateway holding
+   those ports must be stopped for the duration.
+8. Record only that run's exact values in
+   `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
+   `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
+   `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID`. These are GitHub Actions repository
+   variables set by hand; nothing writes them and nothing detects a stale set
+   beyond the equality checks in the release workflow, so updating them without
+   re-running acceptance produces an undetectable false binding.
+9. Require the release workflow rebuild to reproduce the accepted image ID
+   before publishing the exact GHCR tag. Move stable `latest` only after the
+   GitHub Release is immutable. `ghcr.io/moooyo/5gpn` does not exist yet; the
+   first publication creates it **private**, so its visibility must be changed
+   before the documented anonymous `docker compose pull` flow works.
+
+Use ordinary non-force pushes. Do not publish a tag, GHCR image, or GitHub
+Release until the current pin manifest, exact release-mode evidence, and final
+image identity all agree.
+
+## Environment facts that will cost you time
+
+- **The image had never actually been built** before 2026-08-21. The branch was
+  unpushed, so the `checks.yml` `docker-image` job had never run, and the
+  release job is gated shut. The first real build hit four separate defects in a
+  row — an illegal BuildKit builder name, an `/etc/ssl/certs` directory APT
+  could not traverse, a Docker Hub the host cannot reach, and a
+  nondeterministic ldconfig `aux-cache` that made the image ID unreproducible
+  and the release gate unsatisfiable by construction. All four are fixed and
+  covered by `tests/test_docker_delivery_policy.sh`. Expect the same class of
+  surprise from any other path that has never been executed.
+- **`test-env` cannot reach Docker Hub.** `registry-1.docker.io` resolves to a
+  poisoned address, so `docker buildx create` cannot pull the driver image. Use
+  `FIVEGPN_BUILD_REGISTRY_MIRROR=mirror.gcr.io`, which serves all three pinned
+  references. Hosted CI leaves the variable unset and is unaffected.
+- **`test-env` runs a live host gateway** on `5gpn-mihomo.service`, holding
+  `853/80/443/8080/8443`. Release-mode acceptance needs those ports, so it and
+  the gateway cannot run at the same time.
+- **Do not trust a local test run on macOS.** Most suites need bash 4+ and GNU
+  coreutils; on the workstation roughly three quarters fail for environment
+  reasons and at least one exits zero without asserting anything. Only the
+  pure-grep policy suites are meaningful there.
+- **Pin values may appear in exactly two files.** `release/pins.env` and
+  `THIRD_PARTY_NOTICES.md`. `tests/test_release_artifact_binding.sh` enforces
+  it, so describe the pinned pair by role in prose, never by coordinate.
+- **Exiting is not how a container stops retrying.** `restart: unless-stopped`
+  restarts on every exit code, and Docker resets its restart backoff after any
+  run of ten seconds or more — measured on Docker 29, a container that runs 12s
+  and exits restarts every ~15s indefinitely. Anything that wants to stop
+  attempting something expensive must hold, not return.
+
+## Valid design
 
 - Docker is an alternative packaging and lifecycle for the same monolith. It is
   one `linux/amd64` image, one container, one Compose service, and one
@@ -43,25 +166,23 @@ tag, GitHub Release, or GHCR image has been published from the root repository.
   groups. Runtime helpers start only after the mandatory real worker-isolation
   probe and are terminated before engine shutdown. Compose grants the complete
   shutdown path 45 seconds before forced termination.
-- The simplified delivery intentionally accepts weaker trusted-key isolation:
-  the same `fivegpn` identity may read the Cloudflare credential, ACME account,
-  public private keys, and interception CA key. Untrusted extension code still
-  runs only in fresh bounded worker processes.
+- The delivery intentionally accepts weaker trusted-key isolation: the same
+  `fivegpn` identity may read the Cloudflare credential, ACME account, public
+  private keys, and interception CA key. Untrusted extension code still runs
+  only in fresh bounded worker processes.
 - Public `:443` maps to the container-only data-plane socket on `:9443`, while
   the load-bearing controller stays on `127.0.0.1:443` and the sniffed target
-  remains port 443. The current published ingress set has no product `:5060`
-  listener.
+  remains port 443. The published ingress set has no product `:5060` listener.
 - The GitHub Release remains exactly three assets. The same tag may publish
   `ghcr.io/moooyo/5gpn:<tag>` as a separate registry artifact. Stable may move
   `latest` only after immutable GitHub publication; beta never moves it.
 - Image preparation consumes the same bound `release/pins.env` and strict
   `release/pins.sh` parser as the host installer. It creates no Docker-only lock
-  and requires the Core's exact offline
-  `5gpn-container-runtime-v2` handshake.
+  and requires the Core's exact offline `5gpn-container-runtime-v2` handshake.
 
 ## Root adaptation completed
 
-The root Docker implementation now follows the current installer and runtime
+The root Docker implementation follows the current installer and runtime
 contracts:
 
 1. Durable `/etc/5gpn/dns.env` contains exactly the six current installation
@@ -69,20 +190,19 @@ contracts:
    controller path, certificate path, policy, or runtime tuning field.
 2. The controller secret has one persistent source: operator-owned
    `/etc/5gpn/mihomo/config.yaml`. Fresh container bootstrap may generate it
-   once into that YAML, but must never mirror it into `dns.env` or another
+   once into that YAML, but never mirrors it into `dns.env` or another
    credential file.
 3. Existing operator YAML is inspected through the pinned Core's owner-scoped
    `5gpn-config inspect-controller --owner-uid` version-2 projection. Existing
    `dns.json`, `intercept.json`, and `bot.json` are validated through
-   `5gpn-state validate --owner-uid`; container shell code must not maintain a
-   second schema decoder.
+   `5gpn-state validate --owner-uid`; container shell code maintains no second
+   schema decoder.
 4. The state root and document metadata match the current Core contract. Any
-   data volume produced by container-runtime-v1 is rejected unchanged. There
-   is no compatibility alias, automatic rewrite, or in-place volume migration.
+   data volume produced by container-runtime-v1 is rejected unchanged. There is
+   no compatibility alias, automatic rewrite, or in-place volume migration.
 5. The separate persistent `fivegpn-ui` volume contains the Console and both
    profiles as one complete generation at `/opt/5gpn/ui/current`, including the
-   current primary/compat manifests and stable top-level file checks. A flat
-   copied tree and the retired UI tmpfs are not current behavior.
+   current primary/compat manifests and stable top-level file checks.
 6. The fresh/reset seed comes from the current template: rule mode,
    `MATCH,Proxies`, one fixed UDP/443 reject, no `:5060` listener, and no static
    gateway `IP-CIDR` rule. The Core owns the dynamic private-carrier anti-loop
@@ -93,117 +213,24 @@ contracts:
 8. Container probes expect `5gpn-interception` capability and review contract
    version 7 and cover the current controller, state, UI-generation, and
    certificate boundaries.
-9. Compose uses a 45-second stop grace period and Docker acceptance runs on a
-   disposable Engine 28 target reached through
-   `test-env`. The working gateway is authorized only for read-only deployment
-   smoke and must not receive container recreation, OOM injection, certificate
-   mutation, or other fault-injection work.
+9. Bootstrap proves writable cgroup delegation before any certificate work, so
+   a host missing `cgroup: private` or `writable-cgroups=true` fails with a
+   message naming the setting instead of spending a real ACME order first.
 
-## Historical evidence and its limit
+## Origin, and the limit of the old evidence
 
-The older branches passed a development-mode Docker 28 acceptance run on
-`test-env`. That run covered the real cgroup-FD startup probe, authenticated
-capabilities, JavaScript execution, a 512 MiB worker OOM, PID 1 survival,
-certificate hot reload, transactional recreation, and named-volume
-persistence across both durable roots. The candidate image was assembled from
-a previously built local base after Docker Hub timeouts, so the result was
-explicitly development-only.
+The root Docker branch introduced the single-image delivery in `5da2c6c` and
+recorded its pickup state in `ca25ff7`. The runtime branch introduced
+certificate reload support in `7370b743` and the managed container lifecycle in
+`9b7295f6`, both since merged and released.
 
-That evidence is not transferable to the current maintenance merge. It binds
-the old root implementation commit, old runtime binary, old probe corpus, and
-old image ID. It must not populate or satisfy the release variables for a new
-tag.
+Those older branches passed a development-mode Docker 28 acceptance run on
+`test-env` covering the cgroup-FD startup probe, authenticated capabilities,
+JavaScript execution, a 512 MiB worker OOM, PID 1 survival, certificate hot
+reload, transactional recreation, and named-volume persistence. Its candidate
+image was assembled from a previously built local base after Docker Hub
+timeouts, so it was explicitly development-only.
 
-## Release blockers and required order
-
-Steps 1-4 below are complete as of `c420626`. The Mihomo maintenance
-integration merged into `feat/5gpn-monolith` (`9497ae63`) and shipped as an
-immutable release; Zashboard shipped the deployment-neutral wording the same
-way; both coordinates and digests are recorded in `release/pins.env` and the
-notice table, which are the only files permitted to name them. The pin pair is
-therefore no longer a blocker.
-
-The surviving blocker is evidence. No exact image has passed release-mode
-acceptance, so `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
-`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
-`FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` are unset and the publication gate
-rejects every tag.
-
-Steps 5 and 6 are now also complete, and acceptance is blocked only on inputs
-the target does not have — see step 7. To resume, on the acceptance host:
-
-```bash
-cd ~/5gpn-release && git fetch origin && git checkout --detach <tagged-commit>
-git clean -xfd
-FIVEGPN_BUILD_REGISTRY_MIRROR=mirror.gcr.io \
-  bash docker/build-candidate-image.sh --tag <exact-future-tag>
-```
-
-The mirror variable is only needed where `registry-1.docker.io` is unreachable;
-it is digest-pinned and cannot change the resulting image. The command prints
-the image ID and nothing else. Then follow `docs/docker.md` for the container
-and the release-mode acceptance invocation.
-
-1. ~~Finish and review the Mihomo maintenance integration for the v2 container
-   lifecycle, cgroup layout, certificate manager, TLS reload, and orderly
-   shutdown.~~ Done: merged at `9497ae63`.
-2. ~~Run the proportional Mihomo build, race, vet, and acceptance gates remotely
-   on `test-env`; do not run them locally.~~ Done for the tagged release.
-3. ~~Publish immutable container-capable Mihomo and deployment-neutral Zashboard
-   releases.~~ Done; the exact coordinates live in `release/pins.env`.
-4. ~~Update their paired coordinates in `release/pins.env` and the
-   human-readable notice table.~~ Done at `c420626`.
-5. ~~Run the full root shell, pin, image, and container-policy gates remotely.~~
-   Done on `test-env`: `bash -n` gate clean, 43/43 unprivileged suites pass, the
-   three root-only suites pass under `sudo` with real assertions, and
-   `tests/verify-artifact-pins.sh` re-verified all five pinned digests against
-   the published releases. The macOS workstation cannot substitute: most suites
-   need bash 4+ and GNU coreutils, and `tests/test_cert_role_ctl.sh` exits zero
-   there while emitting no assertions at all.
-6. ~~Merge to `main` and build the exact reproducible image.~~ Done. `main`,
-   `beta`, and `codex/docker-runtime` are all fast-forwarded to the same commit,
-   so the accepted commit and the tagged commit are the same object. Build only
-   through `docker/build-candidate-image.sh`; `docs/docker.md` records the
-   command. Building the candidate for the first time exposed four defects that
-   had never been reachable while the image was never actually built: an
-   illegal BuildKit builder name, a `/etc/ssl/certs` directory APT could not
-   traverse, the nondeterministic ldconfig `aux-cache`, and an acceptance host
-   that cannot reach Docker Hub. All four are fixed; `aux-cache` was the one
-   that mattered most, because it made the image ID unreproducible and
-   therefore made step 9's comparison unsatisfiable by construction.
-   Reproducibility is now verified: two from-scratch builds of the same commit,
-   with the builder torn down and the tree `git clean -xfd`ed in between,
-   produced the identical image ID.
-7. **BLOCKED — needs operator-supplied inputs.** Run
-   `tests/container-acceptance.sh` in release mode against that exact image on
-   the disposable Docker target. The run is mutating: it stops, renames, and
-   re-creates the container. Release mode binds `0.0.0.0` on
-   `853/80/443/8080/8443`, so any host gateway holding those ports must be
-   stopped first.
-
-   `test-env` currently cannot supply the certificate inputs. Its host
-   installation uses `CERT_MODE=debug` under the reserved base domain
-   `5gpn.test`, holds no Cloudflare credential, and has no Let's Encrypt
-   lineage. Docker accepts only `CERT_MODE=cloudflare`, and development
-   acceptance mode does not avoid this — it only remaps the published ports,
-   while the container still performs real Cloudflare DNS-01 issuance. Before
-   this step can run, the operator must provide a real base domain whose DNS is
-   hosted on Cloudflare, an API token scoped `Zone:DNS:Edit` for that zone
-   placed on the target as a mode-0600 file, and acceptance that a production
-   Let's Encrypt wildcard order will be spent. Also create the controller
-   secret at `FIVEGPN_CONTROLLER_SECRET_FILE` as a single-link mode-0600
-   regular file of at most 4096 bytes holding one 16-to-512-character token,
-   and ensure the candidate has zero installed extensions.
-8. Record only that run's exact values in
-   `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
-   `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
-   `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID`.
-9. Require the release workflow rebuild to reproduce the accepted image ID
-   before publishing the exact GHCR tag. Move stable `latest` only after the
-   GitHub Release is immutable. `ghcr.io/moooyo/5gpn` does not exist yet; the
-   first publication creates it private, so its visibility must be set before
-   the documented anonymous `docker compose pull` flow works.
-
-Use ordinary non-force pushes. Do not publish a tag, GHCR image, or GitHub
-Release until the current pin manifest, exact release-mode evidence, and final
-image identity all agree.
+That evidence is not transferable. It binds an old implementation commit, old
+runtime binary, old probe corpus, and old image ID, and must not populate or
+satisfy the release variables for any new tag.
