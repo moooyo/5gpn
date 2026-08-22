@@ -17,11 +17,16 @@ records only where the Docker delivery stands and what to do next.
 | Image build | Works, and is reproducible — two from-scratch builds of one commit, builder torn down and tree `git clean -xfd`ed in between, produced the identical image ID. |
 | Cloudflare DNS-01 | **Works end to end as of 2026-08-22**, verified against a real zone. This was never true before: the first live run obtained a correct wildcard and was then rejected by three of this repository's own assertions. See "What the first real issuance cost". |
 | Release acceptance | **PASSED 2026-08-22**, release mode, against `a345d55` and image `sha256:16753c58…` on the disposable Docker target. First time it has ever run. Interception, DoT steering, SNI sniffing, and the extension lifecycle were verified alongside it. |
-| Published artifacts | None **for the Docker delivery**: no GHCR image and no Docker-bearing tag has ever been published. The host-installer release line is a separate, live line and has published through `0.0.81`; do not read this row as "the repository has never released anything." |
+| Published artifacts | **`0.0.82-beta.2`, 2026-08-22** — the first Docker delivery ever published. GitHub pre-release with the three installer assets, plus `ghcr.io/moooyo/5gpn:0.0.82-beta.2`. Stable `latest` still points at `0.0.81`, as the beta channel requires. |
 
-**Next action:** rebuild the candidate at the exact tag that will be pushed,
-re-run acceptance against it, then publish. The host gateway on `test-env` is
-already `systemctl disable --now`, so the five ports stay free across reboots.
+**Next action:** none outstanding for the beta. Promoting to a stable `X.Y.Z`
+means re-running acceptance against that commit, tagging from `main`, and
+accepting that stable does move `latest`.
+
+The `test-env` state after the beta: the host gateway is `systemctl disable
+--now`, the Compose deployment is torn down, and both named volumes are kept.
+The `test.5gpn.de` certificate in `fivegpn-data` is valid to 2026-11-20, so the
+next acceptance run reuses it and spends no ACME order.
 
 ## What the first real issuance cost, and what it proved
 
@@ -148,9 +153,26 @@ downstream will catch skipping it.
 
    Nothing consumes these. They are here so a later reader can tell which image
    and which probes this tag was accepted against.
-9. Publish. The release job builds the image itself and verifies the pushed
-   manifest against those exact bytes; there is no separate acceptance gate to
-   satisfy. Move stable `latest` only after the GitHub Release is immutable. `ghcr.io/moooyo/5gpn` does not exist yet; the
+9. ~~Publish.~~ Done: `0.0.82-beta.2`. The release job builds the image itself
+   and verifies the pushed manifest against those exact bytes; there is no
+   separate acceptance gate to satisfy. Move stable `latest` only after the
+   GitHub Release is immutable.
+
+   Two things this step turned out to get wrong:
+
+   - **The first publication did not create a private package.** This handoff
+     predicted it would and that visibility would need flipping by hand.
+     `ghcr.io/moooyo/5gpn:0.0.82-beta.2` answered an anonymous manifest pull
+     with 200 on the first try. Nothing had to be changed.
+   - **`0.0.82-beta.1` is a dead tag** on the previous commit. Its run reached
+     `Build exact-tag Linux amd64 image` — the first time that step had ever
+     executed, because every earlier release failed at the acceptance gate that
+     preceded it — and aborted: packaging the installer bundle writes into the
+     working tree, and the build script refuses a dirty tree. Fixed at
+     `e884aa9` with a policy assertion pinning the order. The tag cannot be
+     deleted; a repository rule blocks tag deletion, which is the kind of
+     enforcement the removed acceptance gate only imitated. It published
+     nothing. `ghcr.io/moooyo/5gpn` does not exist yet; the
    first publication creates it **private**, so its visibility must be changed
    before the documented anonymous `docker compose pull` flow works.
 
@@ -192,10 +214,12 @@ image identity all agree.
 - **A green `test-env` suite can be an artifact of that gateway.** It creates
   `/run/5gpn`, and until `663978b` one suite silently depended on that directory
   existing. The same shape bit twice more the same day: an assertion tied to the
-  ambient umask, and a `.zash_compat_files` mode check in `scripts/ui-generation.sh`
-  that still fails under `umask 002` — harmless on CI and as root, both of which
-  use `022`, and unfixed. When a check reads the filesystem, ask what it is
-  really reading before trusting the verdict.
+  ambient umask, and a staged Console generation in `scripts/ui-generation.sh`
+  whose files inherited the caller's umask and then failed the validation that
+  would have fixed them — invisible on CI and as root, both `022`, and only
+  reproducible on a login shell with `002`. All three are fixed. When a check
+  reads the filesystem, ask what it is really reading before trusting the
+  verdict.
 - **Do not trust a local test run on macOS.** Most suites need bash 4+ and GNU
   coreutils; on the workstation roughly three quarters fail for environment
   reasons and at least one exits zero without asserting anything. Only the
