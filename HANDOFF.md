@@ -129,6 +129,21 @@ acceptance, so `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
 `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` are unset and the publication gate
 rejects every tag.
 
+Steps 5 and 6 are now also complete, and acceptance is blocked only on inputs
+the target does not have — see step 7. To resume, on the acceptance host:
+
+```bash
+cd ~/5gpn-release && git fetch origin && git checkout --detach <tagged-commit>
+git clean -xfd
+FIVEGPN_BUILD_REGISTRY_MIRROR=mirror.gcr.io \
+  bash docker/build-candidate-image.sh --tag <exact-future-tag>
+```
+
+The mirror variable is only needed where `registry-1.docker.io` is unreachable;
+it is digest-pinned and cannot change the resulting image. The command prints
+the image ID and nothing else. Then follow `docs/docker.md` for the container
+and the release-mode acceptance invocation.
+
 1. ~~Finish and review the Mihomo maintenance integration for the v2 container
    lifecycle, cgroup layout, certificate manager, TLS reload, and orderly
    shutdown.~~ Done: merged at `9497ae63`.
@@ -138,22 +153,47 @@ rejects every tag.
    releases.~~ Done; the exact coordinates live in `release/pins.env`.
 4. ~~Update their paired coordinates in `release/pins.env` and the
    human-readable notice table.~~ Done at `c420626`.
-5. Run the full root shell, pin, image, and container-policy gates remotely.
-   The macOS workstation cannot substitute: most suites need bash 4+ and GNU
-   coreutils, and at least one exits zero while emitting no assertions.
-6. Merge this branch to `main` first. `.github/workflows/release.yml` requires
-   the tagged commit to be ancestor-reachable from `main` or `beta`, while
-   `tests/container-acceptance.sh` requires `HEAD` to equal
-   `FIVEGPN_EXPECTED_COMMIT`, so acceptance bound to a pre-merge commit is
-   discarded. Then build the exact reproducible image from that clean
-   post-merge commit with the pinned Dockerfile frontend, base image, pinned
-   BuildKit, source epoch, and normalized timestamps, using the exact future
-   release tag as `VERSION` — it lands in a label and therefore in the image
-   ID. `docs/docker.md` records the exact command.
-7. Run `tests/container-acceptance.sh` in release mode against that exact image
-   on the disposable Docker target. The run is mutating: it stops, renames, and
-   re-creates the container. Release mode binds `0.0.0.0` on `853/80/443/8080/
-   8443`, so any host gateway holding those ports must be stopped first.
+5. ~~Run the full root shell, pin, image, and container-policy gates remotely.~~
+   Done on `test-env`: `bash -n` gate clean, 43/43 unprivileged suites pass, the
+   three root-only suites pass under `sudo` with real assertions, and
+   `tests/verify-artifact-pins.sh` re-verified all five pinned digests against
+   the published releases. The macOS workstation cannot substitute: most suites
+   need bash 4+ and GNU coreutils, and `tests/test_cert_role_ctl.sh` exits zero
+   there while emitting no assertions at all.
+6. ~~Merge to `main` and build the exact reproducible image.~~ Done. `main`,
+   `beta`, and `codex/docker-runtime` are all fast-forwarded to the same commit,
+   so the accepted commit and the tagged commit are the same object. Build only
+   through `docker/build-candidate-image.sh`; `docs/docker.md` records the
+   command. Building the candidate for the first time exposed four defects that
+   had never been reachable while the image was never actually built: an
+   illegal BuildKit builder name, a `/etc/ssl/certs` directory APT could not
+   traverse, the nondeterministic ldconfig `aux-cache`, and an acceptance host
+   that cannot reach Docker Hub. All four are fixed; `aux-cache` was the one
+   that mattered most, because it made the image ID unreproducible and
+   therefore made step 9's comparison unsatisfiable by construction.
+   Reproducibility is now verified: two from-scratch builds of the same commit,
+   with the builder torn down and the tree `git clean -xfd`ed in between,
+   produced the identical image ID.
+7. **BLOCKED — needs operator-supplied inputs.** Run
+   `tests/container-acceptance.sh` in release mode against that exact image on
+   the disposable Docker target. The run is mutating: it stops, renames, and
+   re-creates the container. Release mode binds `0.0.0.0` on
+   `853/80/443/8080/8443`, so any host gateway holding those ports must be
+   stopped first.
+
+   `test-env` currently cannot supply the certificate inputs. Its host
+   installation uses `CERT_MODE=debug` under the reserved base domain
+   `5gpn.test`, holds no Cloudflare credential, and has no Let's Encrypt
+   lineage. Docker accepts only `CERT_MODE=cloudflare`, and development
+   acceptance mode does not avoid this — it only remaps the published ports,
+   while the container still performs real Cloudflare DNS-01 issuance. Before
+   this step can run, the operator must provide a real base domain whose DNS is
+   hosted on Cloudflare, an API token scoped `Zone:DNS:Edit` for that zone
+   placed on the target as a mode-0600 file, and acceptance that a production
+   Let's Encrypt wildcard order will be spent. Also create the controller
+   secret at `FIVEGPN_CONTROLLER_SECRET_FILE` as a single-link mode-0600
+   regular file of at most 4096 bytes holding one 16-to-512-character token,
+   and ensure the candidate has zero installed extensions.
 8. Record only that run's exact values in
    `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
    `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
