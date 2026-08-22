@@ -118,6 +118,46 @@ owned_plain_file() {
        && "$(path_nlink "$path")" == 1 ]]
 }
 
+# An exact mode is the right assertion for a file this helper creates itself:
+# it controls the mode, so any drift is tampering. It is the wrong assertion for
+# a file Certbot creates, because Certbot's modes follow the ambient umask --
+# 0644/0600 under the common 022, 0600/0600 under this container's `umask 0077`.
+# Pinning one environment's value made a correctly issued lineage read as
+# unsafe and failed every real Cloudflare issuance. Assert the invariant that
+# actually matters instead: a public part must never be writable by anyone else,
+# and a private key must never be readable by anyone else. Both umasks satisfy
+# it; a world-writable certificate or a group-readable key still does not.
+# renewal_conf_safe has always checked its own file this way.
+owned_lineage_part() {
+    local path="$1" stem="$2" mode
+    [[ -f "$path" && ! -L "$path" \
+       && "$(path_uid "$path")" == "$EUID" \
+       && "$(path_gid "$path")" == "$CURRENT_GID" \
+       && "$(path_nlink "$path")" == 1 ]] || return 1
+    mode="$(path_mode "$path")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    if [[ "$stem" == privkey ]]; then
+        (( (8#$mode & 0077) == 0 ))
+    else
+        (( (8#$mode & 0022) == 0 ))
+    fi
+}
+
+# Certbot writes a README into the live root and into every lineage directory.
+# lineage_set_is_exclusive has always tolerated the root one; this is the same
+# inert file one level down, and rejecting it made a freshly issued lineage look
+# structurally wrong. Accept it only as an ordinary unwritable regular file --
+# never a link, and never something another identity can rewrite.
+lineage_readme_is_safe() {
+    local path="$1" mode
+    [[ -f "$path" && ! -L "$path" \
+       && "$(path_uid "$path")" == "$EUID" \
+       && "$(path_gid "$path")" == "$CURRENT_GID" \
+       && "$(path_nlink "$path")" == 1 ]] || return 1
+    mode="$(path_mode "$path")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 ))
+}
+
 owned_exact_line_file() {
 	local path="$1" mode="$2" value="$3" size expected
 	owned_plain_file "$path" "$mode" || return 1
@@ -277,15 +317,24 @@ renewal_conf_safe() {
        && "$(renewal_value "$conf" authenticator | tr -d '[:space:]')" == dns-cloudflare \
        && "$(renewal_value "$conf" dns_cloudflare_credentials | tr -d '[:space:]')" == "$CF_CREDENTIAL" ]] \
         || return 1
-    domains="$(renewal_value "$conf" domains | tr ',' '\n' \
-        | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sort)" || return 1
-    [[ "$domains" == "$(printf '%s\n' "$BASE_DOMAIN" "*.${BASE_DOMAIN}" | sort)" ]] \
-        || return 1
+    # Certbot 4.0.0 -- the version Debian 13 ships and this image pins -- does
+    # not record a `domains` key in the renewal configuration; older versions
+    # did, and requiring it rejected every certificate the current one issued.
+    # The name set is authoritative in the certificate itself, where
+    # certificate_sans_are_exact already asserts it is exactly the apex and its
+    # wildcard on every path that reaches a lineage. So hold a Certbot that
+    # writes the key to it, and do not invent a failure when one omits it.
+    if grep -Eq '^[[:space:]]*domains[[:space:]]*=' "$conf"; then
+        domains="$(renewal_value "$conf" domains | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sort)" || return 1
+        [[ "$domains" == "$(printf '%s\n' "$BASE_DOMAIN" "*.${BASE_DOMAIN}" | sort)" ]] \
+            || return 1
+    fi
     ! grep -Eq '^[[:space:]]*(pre_hook|post_hook|deploy_hook|renew_hook)[[:space:]]*=' "$conf"
 }
 
 archive_lineage_safe() {
-    local archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN" entry name number stem mode complete path part_key
+    local archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN" entry name number stem complete path part_key
     local -A generations=()
     local -A generation_parts=()
     local -a entries=()
@@ -298,9 +347,7 @@ archive_lineage_safe() {
         [[ "$name" =~ ^(cert|chain|fullchain|privkey)([1-9][0-9]{0,8})\.pem$ ]] || return 1
         stem="${BASH_REMATCH[1]}"
         number="${BASH_REMATCH[2]}"
-        mode=644
-        [[ "$stem" != privkey ]] || mode=600
-        owned_plain_file "$entry" "$mode" || return 1
+        owned_lineage_part "$entry" "$stem" || return 1
         generations["$number"]=1
         generation_parts["${number}:${stem}"]=1
     done
@@ -330,7 +377,7 @@ archive_lineage_safe() {
 }
 
 live_link_generation() {
-    local path="$1" stem="$2" expected_mode="$3" raw prefix number resolved
+    local path="$1" stem="$2" raw prefix number resolved
     [[ -L "$path" \
        && "$(path_uid "$path")" == "$EUID" \
        && "$(path_gid "$path")" == "$CURRENT_GID" \
@@ -343,7 +390,7 @@ live_link_generation() {
     [[ "$number" =~ ^[1-9][0-9]{0,8}$ ]] || return 1
     resolved="$LE_ARCHIVE_ROOT/$BASE_DOMAIN/${stem}${number}.pem"
     [[ "$(readlink -f -- "$path" 2>/dev/null || true)" == "$resolved" ]] || return 1
-    owned_plain_file "$resolved" "$expected_mode" || return 1
+    owned_lineage_part "$resolved" "$stem" || return 1
     printf '%s\n' "$number"
 }
 
@@ -358,18 +405,18 @@ live_lineage_tree_safe() {
     for entry in "${entries[@]}"; do
         name="$(basename -- "$entry")"
         case "$name" in
-            cert.pem|chain.pem|fullchain.pem|privkey.pem) ;;
+            cert.pem|chain.pem|fullchain.pem|privkey.pem) ((count += 1)) ;;
+            README) lineage_readme_is_safe "$entry" || return 1 ;;
             *) return 1 ;;
         esac
-        ((count += 1))
     done
     [[ "$count" == 4 ]] || return 1
-    generation="$(live_link_generation "$live/cert.pem" cert 644)" || return 1
-    value="$(live_link_generation "$live/chain.pem" chain 644)" || return 1
+    generation="$(live_link_generation "$live/cert.pem" cert)" || return 1
+    value="$(live_link_generation "$live/chain.pem" chain)" || return 1
     [[ "$value" == "$generation" ]] || return 1
-    value="$(live_link_generation "$live/fullchain.pem" fullchain 644)" || return 1
+    value="$(live_link_generation "$live/fullchain.pem" fullchain)" || return 1
     [[ "$value" == "$generation" ]] || return 1
-    value="$(live_link_generation "$live/privkey.pem" privkey 600)" || return 1
+    value="$(live_link_generation "$live/privkey.pem" privkey)" || return 1
     [[ "$value" == "$generation" ]] || return 1
     combined_digest="$(cat "$LE_ARCHIVE_ROOT/$BASE_DOMAIN/cert${generation}.pem" \
         "$LE_ARCHIVE_ROOT/$BASE_DOMAIN/chain${generation}.pem" | sha256sum)" || return 1
@@ -447,10 +494,10 @@ archive_generation_structurally_safe() {
     local number="$1" archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN"
     local combined_digest fullchain_digest
     [[ "$number" =~ ^[1-9][0-9]{0,8}$ ]] || return 1
-    owned_plain_file "$archive/cert${number}.pem" 644 \
-        && owned_plain_file "$archive/chain${number}.pem" 644 \
-        && owned_plain_file "$archive/fullchain${number}.pem" 644 \
-        && owned_plain_file "$archive/privkey${number}.pem" 600 || return 1
+    owned_lineage_part "$archive/cert${number}.pem" cert \
+        && owned_lineage_part "$archive/chain${number}.pem" chain \
+        && owned_lineage_part "$archive/fullchain${number}.pem" fullchain \
+        && owned_lineage_part "$archive/privkey${number}.pem" privkey || return 1
     combined_digest="$(cat "$archive/cert${number}.pem" "$archive/chain${number}.pem" \
         | sha256sum)" || return 1
     fullchain_digest="$(sha256sum "$archive/fullchain${number}.pem")" || return 1
@@ -462,7 +509,7 @@ archive_generation_structurally_safe() {
 }
 
 scan_complete_archive_generations() {
-    local archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN" entry name stem number mode key
+    local archive="$LE_ARCHIVE_ROOT/$BASE_DOMAIN" entry name stem number key
     local -A seen=()
     local -A generations=()
     local -a entries=()
@@ -476,9 +523,7 @@ scan_complete_archive_generations() {
         [[ "$name" =~ ^(cert|chain|fullchain|privkey)([1-9][0-9]{0,8})\.pem$ ]] || return 1
         stem="${BASH_REMATCH[1]}"
         number="${BASH_REMATCH[2]}"
-        mode=644
-        [[ "$stem" != privkey ]] || mode=600
-        owned_plain_file "$entry" "$mode" || return 1
+        owned_lineage_part "$entry" "$stem" || return 1
         generations["$number"]=1
         seen["${number}:${stem}"]=1
     done
@@ -525,6 +570,7 @@ repair_live_links_to_generation() {
         case "$name" in
             cert.pem|chain.pem|fullchain.pem|privkey.pem)
                 live_repair_link_safe "$entry" || return 1 ;;
+            README) lineage_readme_is_safe "$entry" || return 1 ;;
             .repair.*)
                 live_repair_link_safe "$entry" || return 1
                 rm -f -- "$entry" || return 1 ;;
@@ -584,9 +630,7 @@ unpublished_partial_lineage_is_safe() {
             name="$(basename -- "$entry")"
             [[ "$name" =~ ^(cert|chain|fullchain|privkey)([1-9][0-9]{0,8})\.pem$ ]] || return 1
             stem="${BASH_REMATCH[1]}"
-            mode=644
-            [[ "$stem" != privkey ]] || mode=600
-            owned_plain_file "$entry" "$mode" || return 1
+            owned_lineage_part "$entry" "$stem" || return 1
         done
     fi
     if [[ -e "$live" || -L "$live" ]]; then
@@ -598,6 +642,7 @@ unpublished_partial_lineage_is_safe() {
             case "$(basename -- "$entry")" in
                 cert.pem|chain.pem|fullchain.pem|privkey.pem|.repair.*)
                     live_repair_link_safe "$entry" || return 1 ;;
+                README) lineage_readme_is_safe "$entry" || return 1 ;;
                 *) return 1 ;;
             esac
         done
@@ -639,6 +684,7 @@ ready_lineage_is_recoverable_read_only() {
             case "$(basename -- "$entry")" in
                 cert.pem|chain.pem|fullchain.pem|privkey.pem|.repair.*)
                     live_repair_link_safe "$entry" || return 1 ;;
+                README) lineage_readme_is_safe "$entry" || return 1 ;;
                 *) return 1 ;;
             esac
         done
@@ -684,9 +730,7 @@ reset_unpublished_partial_lineage() {
             name="$(basename -- "$entry")"
             [[ "$name" =~ ^(cert|chain|fullchain|privkey)([1-9][0-9]{0,8})\.pem$ ]] || return 1
             stem="${BASH_REMATCH[1]}"
-            mode=644
-            [[ "$stem" != privkey ]] || mode=600
-            owned_plain_file "$entry" "$mode" || return 1
+            owned_lineage_part "$entry" "$stem" || return 1
         done
     fi
     if [[ -e "$live" || -L "$live" ]]; then
@@ -699,6 +743,7 @@ reset_unpublished_partial_lineage() {
             case "$name" in
                 cert.pem|chain.pem|fullchain.pem|privkey.pem|.repair.*)
                     live_repair_link_safe "$entry" || return 1 ;;
+                README) lineage_readme_is_safe "$entry" || return 1 ;;
                 *) return 1 ;;
             esac
         done
