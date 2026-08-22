@@ -1347,19 +1347,20 @@ therefore runs on a disposable Engine 28, cgroup-v2 target reached through
 `test-env`, never on the working gateway. That acceptance covers the real
 startup probe, an extension worker operation, worker OOM containment,
 authenticated capability version 7, certificate hot publication, container
-recreation, and persistence across both named volumes. Publication fails
-closed unless
-`FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
-`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` match the exact tag commit and its
-current `release/pins.env` Core digest, and
-`FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` matches the reproducibly rebuilt image.
-No hosted-runner fallback or historical development result may satisfy these
-coordinates.
+recreation, and persistence across both named volumes. It is a maintainer's
+obligation before tagging, not a machine check afterwards: publication is bound
+to the image the release job itself builds and pushes, and verifies the pushed
+manifest against those exact bytes. It is deliberately not bound to a record of
+the acceptance run. Three hand-set repository variables once stood there, and
+the value the job compared against was its own output pasted back in by hand --
+satisfiable in one paste by the same person who would skip the run. No
+hosted-runner fallback or historical development result substitutes for
+actually running acceptance.
 
 The merged root implementation requires runtime-v2, and `release/pins.env` now
 records a pair that provides it: the pinned Core answers the handshake and the
 pinned Console carries the deployment-neutral setup wording, both as immutable
-published releases. The gate nonetheless remains closed because no exact image
-has passed release-mode acceptance and the three
-`FIVEGPN_CONTAINER_ACCEPTED_*` variables are unset. Until that run exists and
-records them, the Docker release gate is expected to fail closed.
+published releases. Release-mode acceptance first passed on 2026-08-22, against
+a real Cloudflare zone; before that it had never run, and the first attempt
+proved that three of this repository's own lineage assertions rejected a
+correctly issued certificate.

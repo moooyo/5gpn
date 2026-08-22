@@ -2,9 +2,9 @@
 # Build the exact reproducible release-candidate image.
 #
 # This file is the single definition of that build. Both the release workflow
-# and the maintainer who runs test-env acceptance must use it, because the
-# release job rebuilds the image and refuses to publish unless the rebuilt
-# image ID equals FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID. Every input that lands
+# and the maintainer who runs test-env acceptance must use it, so that the
+# image they accept and the image the release job publishes are built by the
+# same steps and cannot drift. Every input that lands
 # in the config digest therefore has to match: the pinned BuildKit, the pinned
 # Dockerfile frontend and base image, the normalized context timestamps, the
 # component labels, and VERSION -- which becomes
@@ -65,9 +65,8 @@ usage: docker/build-candidate-image.sh --tag RELEASE_TAG [--commit COMMIT] [--im
 The working tree must be clean and must be at the named commit; the acceptance
 driver rejects a candidate whose versioned inputs differ from the commit.
 
-Prints the resulting image ID on stdout. Record it as
-FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID only after release-mode acceptance passes
-against this exact image.
+Prints the resulting image ID on stdout. Record it wherever humans read; no
+workflow consumes it.
 EOF
     exit 2
 }

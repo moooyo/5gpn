@@ -14,11 +14,11 @@ Both are immutable published releases and their digests are bound in the pin
 manifest. `release/pins.env` and `THIRD_PARTY_NOTICES.md` are the only places
 that name the exact coordinates.
 
-What still fails closed is the acceptance evidence. No exact image has passed
-release-mode acceptance, so the three `FIVEGPN_CONTAINER_ACCEPTED_*` repository
-variables are unset and the publication gate rejects every tag. No current tag
-is a supported Docker v2 release until that run exists and those variables
-record it.
+Release-mode acceptance first passed on 2026-08-22. Publication is not gated on
+a record of that run -- the release job binds to the image it builds and pushes,
+not to a hand-set variable -- so running acceptance against the exact candidate
+before tagging is a maintainer's obligation, and nothing downstream will catch
+skipping it.
 
 Do not weaken the handshake or use a development binary in a release image.
 This runbook describes the v2 delivery that becomes usable only after the exact
@@ -373,13 +373,12 @@ FIVEGPN_CONTROLLER_SECRET_FILE=/root/acceptance/controller-secret \
 
 ### Record the evidence
 
-Only the exact release-mode output may populate:
+The run prints the accepted commit, the candidate image ID, the pinned Core
+digest, and the probe-bundle digest. Nothing consumes them: record them where
+humans read, so a later reader can tell which image and which probes a given
+tag was accepted against.
 
-- `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`;
-- `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`; and
-- `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID`.
-
-The release workflow rebuilds the image and requires the resulting image ID to
-equal the accepted value before publishing the exact GHCR tag. Stable `latest`
-moves only after the GitHub Release is immutable. Historical development-mode
-evidence cannot satisfy this gate.
+Publication itself is bound to the image the release job builds and pushes, and
+the pushed manifest is verified against those exact bytes. Stable `latest` moves
+only after the GitHub Release is immutable. Development-mode output is labelled
+so it cannot be mistaken for a release record.

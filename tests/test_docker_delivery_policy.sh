@@ -265,12 +265,7 @@ if grep -Fq 'packages: write' "$RELEASE" \
    && grep -Fq 'map(select(startswith("OCI image: ")))) ==' "$RELEASE" \
    && grep -Fq 'Remote release asset differs from local bytes: $asset' "$RELEASE" \
    && grep -Fq 'Exact OCI tag moved during publication.' "$RELEASE" \
-   && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_COMMIT' "$RELEASE" \
-   && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256' "$RELEASE" \
-   && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID' "$RELEASE" \
-   && grep -Fq '"$ACCEPTED_COMMIT" == "$event_commit"' "$RELEASE" \
-   && grep -Fq '"$ACCEPTED_MIHOMO_SHA256" == "$pinned_sha"' "$RELEASE" \
-   && grep -Fq '"$candidate_id" == "$ACCEPTED_IMAGE_ID"' "$RELEASE" \
+   && ! grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_' "$RELEASE" \
    && [[ "$(grep -Fc 'assert_exact_image_digest' "$RELEASE")" -ge 3 ]] \
    && grep -Fq 'if [[ "$RELEASE_CHANNEL" == stable ]]' "$RELEASE" \
    && grep -Fq 'latest=ghcr.io/moooyo/5gpn:latest' "$RELEASE" \

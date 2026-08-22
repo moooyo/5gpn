@@ -204,9 +204,9 @@ beta 不会更新它：
 
 > [!IMPORTANT]
 > Docker v2 尚未发布。当前 pin 的 Core/Console 配对已具备 v2 contract 且都是
-> 不可变发布，但还没有任何镜像通过 release-mode 验收，三个
-> `FIVEGPN_CONTAINER_ACCEPTED_*` 仓库变量仍为空；在那次验收完成并记录之前，
-> 不能把现有 tag 当作 Docker v2 镜像。
+> 不可变发布，镜像也已于 2026-08-22 通过 release-mode 验收 —— 但尚未向
+> `ghcr.io/moooyo/5gpn` 推送过任何内容，该镜像库还不存在。现有 tag 都不是
+> Docker v2 镜像。
 
 ```bash
 docker version --format '{{.Server.Version}}'

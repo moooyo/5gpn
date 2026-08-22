@@ -70,9 +70,9 @@ Update the status and the normative documentation when an implementation lands.
 ## Simplified Docker delivery
 
 **Status: Implemented on the merged root maintenance line; the container-capable
-Core and Console pair is published and pinned. Fresh release-mode acceptance and
-the resulting `FIVEGPN_CONTAINER_ACCEPTED_*` variables remain pending.
-Recorded 2026-08-09, updated 2026-08-21.**
+Core and Console pair is published and pinned. Release-mode acceptance first
+passed on 2026-08-22. Nothing is published to GHCR yet.
+Recorded 2026-08-09, updated 2026-08-22.**
 
 - Docker is a packaging and process-lifecycle variant, not a second runtime
   architecture. One `linux/amd64` image runs as one container and one Compose
@@ -149,12 +149,13 @@ Recorded 2026-08-09, updated 2026-08-21.**
   reached through `test-env`, covering the startup probe, extension execution
   and OOM containment, certificate hot publication, recreate, and volume
   persistence. The working gateway's read-only deployment authorization does
-  not authorize this mutating acceptance. Release fails closed unless
-  `FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
-  `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` bind that evidence to the exact
-  tag commit and its current pinned core digest, while
-  `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` must equal the reproducibly rebuilt
-  candidate image content digest.
+  not authorize this mutating acceptance. Publication is not gated on a record
+  of that run: three hand-set repository variables once were, and the release
+  job compared its own rebuilt image ID against a value pasted back in by hand,
+  so the gate was satisfiable in one paste by the person who would skip the run.
+  Publication binds instead to the image the release job builds and pushes, and
+  verifies the pushed manifest against those bytes. Running acceptance before
+  tagging is a maintainer's obligation that nothing downstream enforces.
 - The acceptance driver verifies that its Git root and `HEAD` identify the
   accepted commit and that every versioned pin-manifest, Compose, seccomp,
   driver, and probe input is tracked and unchanged at that commit. A copied or
@@ -166,9 +167,8 @@ Recorded 2026-08-09, updated 2026-08-21.**
   and cannot authorize publication of the merged result. The container-capable
   pair is now recorded in `release/pins.env` — the pinned Core answers the
   runtime-v2 handshake and the pinned Console carries the
-  deployment-neutral wording — so publication now waits only on the exact merged
-  image passing fresh release-mode acceptance and the three
-  `FIVEGPN_CONTAINER_ACCEPTED_*` variables recording that run.
+  deployment-neutral wording. The merged image passed fresh release-mode
+  acceptance on 2026-08-22; publication to GHCR has still not happened.
 
 ## Cross-repository development baselines
 

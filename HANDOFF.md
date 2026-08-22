@@ -16,11 +16,12 @@ records only where the Docker delivery stands and what to do next.
 | Offline gates | Green in hosted CI on `main`, which is the gate that counts. Do not read a green `test-env` run as equivalent: until 2026-08-22 the suites passed there and failed on every clean runner, because `tests/test_docker_certificate_helpers.sh` depended on a `/run/5gpn` that only the host gateway's presence created. CI had been red on `main` for two days, and `set -euo pipefail` aborted the shell job at the seventh suite, so most suites were not running at all. |
 | Image build | Works, and is reproducible — two from-scratch builds of one commit, builder torn down and tree `git clean -xfd`ed in between, produced the identical image ID. |
 | Cloudflare DNS-01 | **Works end to end as of 2026-08-22**, verified against a real zone. This was never true before: the first live run obtained a correct wildcard and was then rejected by three of this repository's own assertions. See "What the first real issuance cost". |
-| Release acceptance | **Not run.** No longer blocked on code; the remaining inputs are operational. |
+| Release acceptance | **PASSED 2026-08-22**, release mode, against `a345d55` and image `sha256:16753c58…` on the disposable Docker target. First time it has ever run. Interception, DoT steering, SNI sniffing, and the extension lifecycle were verified alongside it. |
 | Published artifacts | None **for the Docker delivery**: no GHCR image and no Docker-bearing tag has ever been published. The host-installer release line is a separate, live line and has published through `0.0.81`; do not read this row as "the repository has never released anything." |
 
-**Next action:** disable the host gateway on the acceptance target, rebuild the
-candidate at the exact tag that will be pushed, then run steps 7-9.
+**Next action:** rebuild the candidate at the exact tag that will be pushed,
+re-run acceptance against it, then publish. The host gateway on `test-env` is
+already `systemctl disable --now`, so the five ports stay free across reboots.
 
 ## What the first real issuance cost, and what it proved
 
@@ -82,11 +83,16 @@ release-mode acceptance invocation.
 
 ## Release blockers and required order
 
-Steps 1-6 are complete. The surviving blocker is evidence: no exact image has
-passed release-mode acceptance, so `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
-`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
-`FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` are unset and the publication gate
-rejects every tag.
+Steps 1-8 are complete. Only publication remains.
+
+Publication is no longer gated on a record of the acceptance run. Three hand-set
+repository variables used to stand there, and the release job compared its own
+rebuilt image ID against a value a maintainer had pasted back in -- so the gate
+was satisfiable in one paste by exactly the person who would skip the run. It is
+gone. Publication binds to the image the release job itself builds and pushes,
+and verifies the pushed manifest against those bytes. Running acceptance against
+the exact candidate before tagging is now a maintainer's obligation, and nothing
+downstream will catch skipping it.
 
 1. ~~Finish and review the Mihomo maintenance integration for the v2 container
    lifecycle, cgroup layout, certificate manager, TLS reload, and orderly
@@ -108,8 +114,10 @@ rejects every tag.
    tagged commit can be the same object; keep it that way. Build only through
    `docker/build-candidate-image.sh`, which the release workflow also calls, so
    the two cannot drift.
-7. **Ready to run.** Run `tests/container-acceptance.sh` in release mode against
-   the exact image on the disposable Docker target.
+7. ~~Run `tests/container-acceptance.sh` in release mode against the exact image
+   on the disposable Docker target.~~ **Passed 2026-08-22** against `a345d55`.
+   Re-run it against whatever commit is actually tagged; the image ID changes
+   with the revision label, so a passing run does not carry forward.
 
    The certificate inputs are supplied and proven: a real Cloudflare zone, a
    token verified to hold `Zone:DNS:Edit` on it, and an issued wildcard already
@@ -129,16 +137,20 @@ rejects every tag.
    - a candidate with zero installed extensions, or the extension probe aborts.
 
    The run is mutating: it stops, renames, and re-creates the container.
-8. Record only that run's exact values in
-   `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
-   `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
-   `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID`. These are GitHub Actions repository
-   variables set by hand; nothing writes them and nothing detects a stale set
-   beyond the equality checks in the release workflow, so updating them without
-   re-running acceptance produces an undetectable false binding.
-9. Require the release workflow rebuild to reproduce the accepted image ID
-   before publishing the exact GHCR tag. Move stable `latest` only after the
-   GitHub Release is immutable. `ghcr.io/moooyo/5gpn` does not exist yet; the
+8. ~~Record the run's evidence.~~ Done for `a345d55`:
+
+   | | |
+   |---|---|
+   | accepted commit | `a345d55a718c28b1320775ac71741a4da7c64713` |
+   | accepted image ID | `sha256:16753c5803bbb3c8170d7ab52465f7ecce7f1363006f602d1e50be7a7e3ba61d` |
+   | pinned Core digest | `e5430878f133a02eaced60c5509872e6b8afc0a37255bda574ea2be434a913df` |
+   | probe bundle | `39262f0005e1b3ee849c67faefd8c7e62fe11fa60b0b22c125a1a8e5123d32f7` |
+
+   Nothing consumes these. They are here so a later reader can tell which image
+   and which probes this tag was accepted against.
+9. Publish. The release job builds the image itself and verifies the pushed
+   manifest against those exact bytes; there is no separate acceptance gate to
+   satisfy. Move stable `latest` only after the GitHub Release is immutable. `ghcr.io/moooyo/5gpn` does not exist yet; the
    first publication creates it **private**, so its visibility must be changed
    before the documented anonymous `docker compose pull` flow works.
 

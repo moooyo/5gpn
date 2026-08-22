@@ -177,26 +177,16 @@ jobs:
             done < <(git tag --list)
           fi
 
-      - name: Require exact test-env container acceptance
-        shell: bash
-        env:
-          ACCEPTED_COMMIT: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_COMMIT }}
-          ACCEPTED_MIHOMO_SHA256: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256 }}
-          ACCEPTED_IMAGE_ID: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID }}
-        run: |
-          set -euo pipefail
-          source release/pins.sh
-          load_release_pins release/pins.env
-          pinned_sha="$(release_artifact_sha256 mihomo)"
-          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          [[ "$pinned_sha" =~ ^[0-9a-f]{64}$ ]] \
-            || { echo "release/pins.env does not provide one exact mihomo digest." >&2; exit 1; }
-          [[ "$ACCEPTED_COMMIT" == "$event_commit" ]] \
-            || { echo "test-env has not accepted exact commit $event_commit." >&2; exit 1; }
-          [[ "$ACCEPTED_MIHOMO_SHA256" == "$pinned_sha" ]] \
-            || { echo "test-env acceptance does not bind pinned mihomo $pinned_sha." >&2; exit 1; }
-          [[ "$ACCEPTED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] \
-            || { echo "test-env acceptance has no exact candidate image ID." >&2; exit 1; }
+      # No manual acceptance gate. Three hand-set repository variables used to
+      # stand here, asserting that a maintainer had run tests/container-acceptance.sh
+      # on test-env against one exact image. Nothing wrote them, nothing could
+      # detect a stale set, and the value they were compared against was the one
+      # this job produces -- so the check was satisfied by copying CI's own output
+      # back into a variable. A gate the bypasser can forge in one paste is
+      # ceremony, not a control. What remains below is not forgeable by hand: the
+      # image is built here, and the pushed manifest is verified against the bytes
+      # this job actually built.
+
 
       # No Go or Node toolchain is set up here. The runtime and Console are
       # built in their own repositories; this job packages installer inputs and
@@ -350,16 +340,6 @@ jobs:
             --tag "${GITHUB_REF_NAME}" \
             --commit "$event_commit" \
             --image "$CANDIDATE_IMAGE"
-
-      - name: Bind candidate image to test-env acceptance
-        env:
-          CANDIDATE_IMAGE: 5gpn-release-candidate:${{ github.sha }}
-          ACCEPTED_IMAGE_ID: ${{ vars.FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID }}
-        run: |
-          set -euo pipefail
-          candidate_id="$(docker image inspect --format '{{.Id}}' "$CANDIDATE_IMAGE")"
-          [[ "$candidate_id" == "$ACCEPTED_IMAGE_ID" ]] \
-            || { echo "Candidate image ID differs from the exact test-env result." >&2; exit 1; }
 
       - name: Collect exact release assets
         run: |

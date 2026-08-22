@@ -459,11 +459,13 @@ grep -Fq 'group: 5gpn-release-${{ github.ref }}' "$RELEASE" \
     || fail "same-tag runs and immutable publication are not independently serialized"
 grep -Fq 'uses: ./.github/workflows/checks.yml' "$RELEASE" \
     || fail "release channels do not share the repository checks gate"
-grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_COMMIT' "$RELEASE" \
-    && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256' "$RELEASE" \
-    && grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID' "$RELEASE" \
-    && grep -Fq 'Candidate image ID differs from the exact test-env result.' "$RELEASE" \
-    || fail "release publication is not bound to exact test-env evidence"
+# Publication is bound to what this job built, not to a hand-set variable. The
+# removed gate compared CI's own image ID against a value a maintainer pasted
+# back in, so it could be satisfied without running anything.
+! grep -Fq 'FIVEGPN_CONTAINER_ACCEPTED_' "$RELEASE" \
+    || fail "the hand-set acceptance gate reappeared in the release workflow"
+grep -Fq 'remote_id" == "$candidate_id" && "$remote_labels" == "$candidate_labels' "$RELEASE" \
+    || fail "release publication is not bound to the image this job built"
 grep -Fq 'RELEASE_TAG=\"${GITHUB_REF_NAME}\"' "$RELEASE" \
     || fail "release installer bundle is not stamped to the exact tag"
 

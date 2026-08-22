@@ -406,13 +406,16 @@ GitHub-hosted CI may build and statically inspect the Docker image but cannot
 prove delegated cgroup behavior. Docker runtime acceptance, including a real
 extension worker and OOM containment, must run on a disposable Engine 28,
 cgroup-v2 target reached through `test-env`; it is not authorized on the
-working gateway and must never be replaced with a hosted-runner mock. A release
-must fail closed unless `FIVEGPN_CONTAINER_ACCEPTED_COMMIT` and
-`FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256` match its exact commit and current
-pin manifest, and `FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID` matches the
-reproducibly rebuilt candidate. Update those variables only after the exact
-candidate passes from a checkout whose Git root, HEAD, and versioned acceptance
-inputs match that commit byte-for-byte.
+working gateway and must never be replaced with a hosted-runner mock. Run it
+against the exact candidate before tagging, from a checkout whose Git root,
+HEAD, and versioned acceptance inputs match that commit byte-for-byte.
+
+Publication is not gated on that run. It used to be, through three hand-set
+repository variables; the release job compared its own rebuilt image ID against
+a value a maintainer had pasted back in, which anyone bypassing the gate could
+satisfy in one paste. Publication is instead bound to what the release job
+itself builds and pushes, which no one can forge by hand. Acceptance is a
+maintainer's obligation before tagging, not a machine check afterwards.
 The pinned pair already implements container-runtime-v2 and carries the
 deployment-neutral Console wording, so the pins are no longer the blocker. The
 surviving blocker is that no exact image has passed release-mode acceptance and

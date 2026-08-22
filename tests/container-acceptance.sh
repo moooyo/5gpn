@@ -746,16 +746,18 @@ docker rm "$RECREATE_BACKUP" >/dev/null
 RECREATE_BACKUP=''
 RECREATE_ORIGINAL=''
 
-printf 'FIVEGPN_CONTAINER_ACCEPTANCE_PROBES_SHA256=%s\n' "$probe_bundle_sha"
+# Nothing consumes these. They used to be pasted into repository variables that
+# gated publication; that gate is gone, because it compared CI's own output
+# against a value a human had pasted back in. They remain because a run that
+# passes should still say exactly what it passed against -- read them, record
+# them where humans read, and do not wire them back into a workflow.
+printf 'acceptance probes sha256: %s\n' "$probe_bundle_sha"
+printf 'accepted commit:          %s\n' "$EXPECTED_COMMIT"
+printf 'accepted image id:        %s\n' "$after_image"
 if [[ "$ACCEPTANCE_MODE" == release ]]; then
-    printf 'FIVEGPN_CONTAINER_ACCEPTED_COMMIT=%s\n' "$EXPECTED_COMMIT"
-    printf 'FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256=%s\n' "$EXPECTED_MIHOMO_SHA256"
-    printf 'FIVEGPN_CONTAINER_ACCEPTED_IMAGE_ID=%s\n' "$after_image"
+    printf 'pinned mihomo sha256:     %s\n' "$EXPECTED_MIHOMO_SHA256"
     echo 'Docker 28 test-env disposable release acceptance: PASS'
 else
-    printf 'FIVEGPN_CONTAINER_DEVELOPMENT_ACCEPTED_COMMIT=%s\n' "$EXPECTED_COMMIT"
-    printf 'FIVEGPN_CONTAINER_DEVELOPMENT_ACCEPTED_MIHOMO_BINARY_SHA256=%s\n' \
-        "$EXPECTED_MIHOMO_BINARY_SHA256"
-    printf 'FIVEGPN_CONTAINER_DEVELOPMENT_ACCEPTED_IMAGE_ID=%s\n' "$after_image"
+    printf 'mihomo binary sha256:     %s\n' "$EXPECTED_MIHOMO_BINARY_SHA256"
     echo 'Docker 28 test-env disposable development acceptance: PASS (not release evidence)'
 fi
