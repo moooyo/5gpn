@@ -1,6 +1,6 @@
 # 5gpn Docker integration handoff
 
-**Recorded:** 2026-08-18. **Updated:** 2026-08-21.
+**Recorded:** 2026-08-18. **Updated:** 2026-08-22.
 
 This file is a pickup record, not an architecture authority. Read
 [`AGENTS.md`](AGENTS.md), [`docs/architecture.md`](docs/architecture.md), and
@@ -13,13 +13,46 @@ records only where the Docker delivery stands and what to do next.
 |---|---|
 | Code | `main`, `beta`, and `codex/docker-runtime` are all fast-forwarded to the same commit. Confirm with `git rev-parse origin/main origin/beta origin/codex/docker-runtime`. |
 | Core and Console | Both released and pinned. `release/pins.env` and `THIRD_PARTY_NOTICES.md` are the only files allowed to name their coordinates. |
-| Offline gates | Green on `test-env`: `bash -n` clean, 43/43 unprivileged suites, all three root-only suites under `sudo` with real assertions, and every pinned digest re-verified against its published release. |
+| Offline gates | Green in hosted CI on `main`, which is the gate that counts. Do not read a green `test-env` run as equivalent: until 2026-08-22 the suites passed there and failed on every clean runner, because `tests/test_docker_certificate_helpers.sh` depended on a `/run/5gpn` that only the host gateway's presence created. CI had been red on `main` for two days, and `set -euo pipefail` aborted the shell job at the seventh suite, so most suites were not running at all. |
 | Image build | Works, and is reproducible — two from-scratch builds of one commit, builder torn down and tree `git clean -xfd`ed in between, produced the identical image ID. |
-| Release acceptance | **Not run.** Blocked on operator-supplied certificate inputs, not on code. |
-| Published artifacts | None. No tag, no GitHub Release, no GHCR image has ever been published from this repository. |
+| Cloudflare DNS-01 | **Works end to end as of 2026-08-22**, verified against a real zone. This was never true before: the first live run obtained a correct wildcard and was then rejected by three of this repository's own assertions. See "What the first real issuance cost". |
+| Release acceptance | **Not run.** No longer blocked on code; the remaining inputs are operational. |
+| Published artifacts | None **for the Docker delivery**: no GHCR image and no Docker-bearing tag has ever been published. The host-installer release line is a separate, live line and has published through `0.0.81`; do not read this row as "the repository has never released anything." |
 
-**Next action:** supply the acceptance inputs described under step 7, then run
-steps 7-9. Everything before that is done.
+**Next action:** disable the host gateway on the acceptance target, rebuild the
+candidate at the exact tag that will be pushed, then run steps 7-9.
+
+## What the first real issuance cost, and what it proved
+
+Recorded 2026-08-22. A real Cloudflare zone and a `Zone:DNS:Edit` token were
+supplied, and `CERT_MODE=cloudflare` ran for the first time in this
+repository's history. Let's Encrypt issued a correct wildcard on the first
+attempt. This helper then refused it, three times over, and the container
+restart-looped:
+
+1. Exact file-mode assertions on the lineage. Certbot's modes follow the
+   ambient umask, and the entrypoint sets `umask 0077`, so it wrote `0600`
+   where the checks demanded `0644` — rejecting the *stricter* state.
+2. `live/<domain>/README`. Certbot writes one into every lineage directory.
+   `lineage_set_is_exclusive` already tolerated the copy in the live root; the
+   inner one was not in any whitelist.
+3. `domains =` in the renewal configuration. Certbot 4.0.0, the version Debian
+   13 ships and this image pins, does not write that key. Older versions did.
+
+All three are fixed at `5c22abe`, and the assertions now describe invariants
+rather than one environment's defaults. Two lessons worth keeping:
+
+- **A path that has never executed is not evidence, however green its gates
+  are.** Every one of these survived `bash -n`, 43 suites, and hosted CI,
+  because none of them can see a real certificate.
+- **Re-test against the artifact, not the tool.** The issued lineage was cloned
+  out of the volume and the validators were run against it directly as uid
+  10001. That found defect 3 — which only became reachable once 1 and 2 were
+  fixed — without spending a second ACME order or stopping the gateway again.
+
+The certificate from that run is still in `fivegpn-data`, valid to 2026-11-20.
+Bootstrap accepts it and skips Certbot entirely, so acceptance can be re-run
+against it at no ACME cost.
 
 Do not treat any image ID quoted in this repository's history as acceptance
 evidence. `VERSION` and `VCS_REF` land in labels and therefore inside the image
@@ -68,36 +101,34 @@ rejects every tag.
    Done on `test-env`. The macOS workstation cannot substitute: most suites need
    bash 4+ and GNU coreutils, and `tests/test_cert_role_ctl.sh` exits zero there
    while emitting no assertions at all, which reads as a pass.
-6. ~~Merge to `main` and build the exact reproducible image.~~ Done. Because
-   every merge was a fast-forward, the accepted commit and the tagged commit can
-   be the same object; keep it that way. Build only through
+6. ~~Merge to `main` and build the exact reproducible image.~~ Done, but the
+   image must be rebuilt whenever `main` moves: the revision label is inside the
+   config digest, so the candidate at `40404b6` is not the candidate at today's
+   HEAD. Because every merge was a fast-forward, the accepted commit and the
+   tagged commit can be the same object; keep it that way. Build only through
    `docker/build-candidate-image.sh`, which the release workflow also calls, so
    the two cannot drift.
-7. **BLOCKED — needs operator-supplied inputs.** Run
-   `tests/container-acceptance.sh` in release mode against that exact image on
-   the disposable Docker target.
+7. **Ready to run.** Run `tests/container-acceptance.sh` in release mode against
+   the exact image on the disposable Docker target.
 
-   `test-env` cannot supply the certificate inputs as it stands. Its host
-   installation uses `CERT_MODE=debug` under the reserved base domain
-   `5gpn.test`, holds no Cloudflare credential, and has no Let's Encrypt
-   lineage. Docker accepts only `CERT_MODE=cloudflare`. Development acceptance
-   mode does **not** route around this — it only remaps the published ports,
-   while the container still performs real Cloudflare DNS-01 issuance.
+   The certificate inputs are supplied and proven: a real Cloudflare zone, a
+   token verified to hold `Zone:DNS:Edit` on it, and an issued wildcard already
+   in `fivegpn-data`. Bootstrap accepts that lineage and skips Certbot, so a
+   re-run spends no ACME order. Development acceptance mode is not an
+   alternative: it requires an image labelled `development-local`, and the
+   candidate this repository builds is `pinned-release`.
 
-   Before this step can run, provide:
+   What remains is operational:
 
-   - a real base domain whose DNS is hosted on Cloudflare;
-   - an API token scoped `Zone:DNS:Edit` for that zone, placed on the target as
-     a mode-0600 file;
+   - the host gateway must not hold `853/80/443/8080/8443`. `systemctl stop`
+     alone is not enough — the unit returns on reboot and will take the ports
+     back mid-run. Use `systemctl disable --now 5gpn-mihomo`;
    - a controller secret at `FIVEGPN_CONTROLLER_SECRET_FILE` — a single-link
      mode-0600 regular file of at most 4096 bytes holding one
      16-to-512-character token;
-   - a candidate with zero installed extensions, or the extension probe aborts;
-   - acceptance that a production Let's Encrypt wildcard order will be spent.
+   - a candidate with zero installed extensions, or the extension probe aborts.
 
-   The run is mutating: it stops, renames, and re-creates the container. Release
-   mode binds `0.0.0.0` on `853/80/443/8080/8443`, so any host gateway holding
-   those ports must be stopped for the duration.
+   The run is mutating: it stops, renames, and re-creates the container.
 8. Record only that run's exact values in
    `FIVEGPN_CONTAINER_ACCEPTED_COMMIT`,
    `FIVEGPN_CONTAINER_ACCEPTED_MIHOMO_SHA256`, and
@@ -110,6 +141,17 @@ rejects every tag.
    GitHub Release is immutable. `ghcr.io/moooyo/5gpn` does not exist yet; the
    first publication creates it **private**, so its visibility must be changed
    before the documented anonymous `docker compose pull` flow works.
+
+   **Publish the first one as a beta.** `release.yml` classifies `X.Y.Z` as
+   stable — reachable from `main`, `prerelease=false`, `make_latest=true` — and
+   `X.Y.Z-beta.N` as beta, reachable from `beta`, `make_latest=false`. Both
+   channels publish a GHCR image. Since the very first publication creates the
+   package private, a stable tag would mark a Release latest and make `latest`
+   eligible to move while the documented anonymous pull is still broken. A beta
+   tag cannot move `latest` by rule, so the package can be created, flipped to
+   public, and the whole publish path exercised before any stable tag depends on
+   it. `0.0.81` was preceded by `0.0.81-beta.1` through `-beta.4`; keep that
+   shape.
 
 Use ordinary non-force pushes. Do not publish a tag, GHCR image, or GitHub
 Release until the current pin manifest, exact release-mode evidence, and final
@@ -132,7 +174,16 @@ image identity all agree.
   references. Hosted CI leaves the variable unset and is unaffected.
 - **`test-env` runs a live host gateway** on `5gpn-mihomo.service`, holding
   `853/80/443/8080/8443`. Release-mode acceptance needs those ports, so it and
-  the gateway cannot run at the same time.
+  the gateway cannot run at the same time. Disable rather than stop it: a plain
+  `systemctl stop` is undone by the next reboot, and the unit will reclaim the
+  ports underneath a later run.
+- **A green `test-env` suite can be an artifact of that gateway.** It creates
+  `/run/5gpn`, and until `663978b` one suite silently depended on that directory
+  existing. The same shape bit twice more the same day: an assertion tied to the
+  ambient umask, and a `.zash_compat_files` mode check in `scripts/ui-generation.sh`
+  that still fails under `umask 002` — harmless on CI and as root, both of which
+  use `022`, and unfixed. When a check reads the filesystem, ask what it is
+  really reading before trusting the verdict.
 - **Do not trust a local test run on macOS.** Most suites need bash 4+ and GNU
   coreutils; on the workstation roughly three quarters fail for environment
   reasons and at least one exits zero without asserting anything. Only the
