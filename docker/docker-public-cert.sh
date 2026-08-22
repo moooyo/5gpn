@@ -1109,10 +1109,24 @@ profiles_match_live_inputs() {
        && "$(profile_manifest_value "$manifest" gateway_ipv4)" == "$GATEWAY_IP" ]]
 }
 
+# scripts/gen-ios-profile.sh stages `.ios-profile.XXXXXX` under /run/5gpn only in
+# container mode; otherwise it stages inside the unpublished UI generation, which
+# ui_generation_cleanup_orphan_candidates already owns. This mirrors that exact
+# condition. Scanning /run/5gpn unconditionally reached for a host path that has
+# nothing to do with the run: it made this code path pass only on a machine that
+# happened to have a live container runtime directory, and fail everywhere else.
+profile_stage_root() {
+    [[ "${FIVEGPN_RUNTIME:-}" == container \
+       && "$EUID" == "$EXPECTED_UID" \
+       && "$CURRENT_GID" == "$EXPECTED_GID" ]] || return 1
+    printf '%s\n' /run/5gpn
+}
+
 scrub_profile_stages() {
-    local entry name stage_file stage_name marker_seen=0 marker_exact=0 mode size
+    local entry name stage_file stage_name marker_seen=0 marker_exact=0 mode size root
     local -a root_entries=() stage_entries=()
-    directory_entries /run/5gpn root_entries || return 1
+    root="$(profile_stage_root)" || return 0
+    directory_entries "$root" root_entries || return 1
     for entry in "${root_entries[@]}"; do
         name="$(basename -- "$entry")"
         [[ "$name" =~ ^\.ios-profile\.[0-9A-Za-z]{6}$ ]] || continue
@@ -1154,7 +1168,7 @@ scrub_profile_stages() {
         fi
         for stage_file in "${stage_entries[@]}"; do rm -f -- "$stage_file" || return 1; done
         rmdir -- "$entry" || return 1
-        sync -f /run/5gpn || return 1
+        sync -f "$root" || return 1
     done
 }
 
