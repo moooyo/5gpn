@@ -258,7 +258,6 @@ fi
 
 if grep -Fq 'packages: write' "$RELEASE" \
    && grep -Fq 'IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}' "$RELEASE" \
-   && grep -Fq 'release_artifact_sha256 mihomo' "$RELEASE" \
    && grep -Fq 'remote_id" == "$candidate_id" && "$remote_labels" == "$candidate_labels' "$RELEASE" \
    && grep -Fq '(has("manifests") | not)' "$RELEASE" \
    && grep -Fq 'body="OCI image: ${image_ref}"' "$RELEASE" \

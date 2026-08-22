@@ -143,7 +143,7 @@ downstream will catch skipping it.
    |---|---|
    | accepted commit | `a345d55a718c28b1320775ac71741a4da7c64713` |
    | accepted image ID | `sha256:16753c5803bbb3c8170d7ab52465f7ecce7f1363006f602d1e50be7a7e3ba61d` |
-   | pinned Core digest | `e5430878f133a02eaced60c5509872e6b8afc0a37255bda574ea2be434a913df` |
+   | pinned Core digest | the `MIHOMO_SHA256` in `release/pins.env` at that commit — pin values may appear in exactly two files, and this is not one of them |
    | probe bundle | `39262f0005e1b3ee849c67faefd8c7e62fe11fa60b0b22c125a1a8e5123d32f7` |
 
    Nothing consumes these. They are here so a later reader can tell which image
