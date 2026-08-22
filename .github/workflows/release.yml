@@ -196,6 +196,32 @@ jobs:
       # Docker launch files, their runbook, and the versioned test-env acceptance
       # driver/probes, and is stamped to this exact tag. The quick installer never
       # falls back to branch content.
+      # The OCI image is a registry artifact, never a fourth GitHub Release
+      # asset. Component preparation reads the tagged release/pins.env through
+      # its strict parser rather than a parallel Docker lock file and verifies both upstream digests before the
+      # The candidate build lives in docker/build-candidate-image.sh so this job
+      # and the maintainer who runs test-env acceptance execute byte-identical
+      # steps; a second copy of these commands here would let the two drift
+      # silently. VERSION lands in a label and therefore in the config digest.
+      # Component preparation runs inside the script, reading the tagged
+      # release/pins.env through its strict parser rather than a parallel
+      # Docker lock file.
+      #
+      # This runs before the installer bundle is packaged: the script refuses a
+      # dirty working tree, and packaging writes its stage directory, tarball,
+      # and checksums into it.
+      - name: Build exact-tag Linux amd64 image
+        shell: bash
+        env:
+          CANDIDATE_IMAGE: 5gpn-release-candidate:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          bash docker/build-candidate-image.sh \
+            --tag "${GITHUB_REF_NAME}" \
+            --commit "$event_commit" \
+            --image "$CANDIDATE_IMAGE"
+
       - name: Package installer bundle
         run: |
           set -euo pipefail
@@ -317,29 +343,6 @@ jobs:
             || { echo "Unexpected non-file archive entry: $unexpected_archive_entry" >&2; exit 1; }
 
           sha256sum 5gpn-installer.tar.gz > checksums.txt
-
-      # The OCI image is a registry artifact, never a fourth GitHub Release
-      # asset. Component preparation reads the tagged release/pins.env through
-      # its strict parser rather than a parallel Docker lock file and verifies both upstream digests before the
-      # The candidate build lives in docker/build-candidate-image.sh so this job
-      # and the maintainer who ran test-env acceptance execute byte-identical
-      # steps. The image ID is compared against the accepted one below, and
-      # VERSION lands in a label and therefore in the config digest, so a second
-      # copy of these commands here would be a silent way to break that
-      # comparison. Component preparation runs inside the script, reading the
-      # tagged release/pins.env through its strict parser rather than a parallel
-      # Docker lock file.
-      - name: Build exact-tag Linux amd64 image
-        shell: bash
-        env:
-          CANDIDATE_IMAGE: 5gpn-release-candidate:${{ github.sha }}
-        run: |
-          set -euo pipefail
-          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          bash docker/build-candidate-image.sh \
-            --tag "${GITHUB_REF_NAME}" \
-            --commit "$event_commit" \
-            --image "$CANDIDATE_IMAGE"
 
       - name: Collect exact release assets
         run: |

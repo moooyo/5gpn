@@ -277,6 +277,20 @@ else
     fail "GHCR tag or stable/beta latest policy drifted"
 fi
 
+# docker/build-candidate-image.sh refuses a dirty working tree, and packaging the
+# installer bundle writes its stage directory, tarball, and checksums into that
+# tree. So the image must be built first. This ordering had never been exercised:
+# every release before 2026-08-22 failed at the acceptance gate that preceded
+# both steps, so the image build was never reached and the conflict stayed
+# invisible until that gate was removed.
+image_build_line="$(grep -n 'name: Build exact-tag Linux amd64 image' "$RELEASE" | head -1 | cut -d: -f1)"
+bundle_line="$(grep -n 'name: Package installer bundle' "$RELEASE" | head -1 | cut -d: -f1)"
+if [[ "$image_build_line" =~ ^[0-9]+$ && "$bundle_line" =~ ^[0-9]+$    && "$image_build_line" -lt "$bundle_line" ]]    && grep -Fq 'the working tree is dirty; acceptance requires a clean checkout' \n        "$ROOT/docker/build-candidate-image.sh"; then
+    pass "the exact-tag image is built before packaging dirties the working tree"
+else
+    fail "installer packaging precedes the image build and will fail its clean-tree check"
+fi
+
 # The candidate build has exactly one definition. If the release job ever
 # re-inlines it, the maintainer who ran test-env acceptance and the job that
 # rebuilds before publishing stop executing the same steps -- and the only
