@@ -926,11 +926,21 @@ _ui_generation_stable_urls_remain_available() {
 
 ui_generation_stage_tree() {
     local root="$1" source="$2" version="$3" current candidate
+    local entry_umask staged_rc=0
     ui_generation_claim_root "$root" || return 1
     _ui_generation_source_tree_is_safe "$source" || return 1
     [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]{0,127}$ ]] || return 1
     current="$(_ui_generation_current_target "$root")" || return 1
     candidate="$(_ui_generation_new_candidate "$root")" || return 1
+    # Several files below are created by redirection, which takes its mode from
+    # the caller's umask. _ui_generation_normalize_candidate would chmod them to
+    # 0644, but it validates the candidate before normalizing it -- so under a
+    # 0002 umask a freshly staged generation failed its own safety check at
+    # 0664, and only on machines whose login umask happens to be 0002. This
+    # library creates these files, so it fixes their mode instead of inheriting
+    # one. The caller's umask is restored on every exit path.
+    entry_umask="$(umask)"
+    umask 0022
     if ! _ui_generation_write_base_target "$root" "$candidate" "$current" \
        || ! _ui_generation_copy_source "$root" "$source" "$candidate" \
        || ! printf '%s\n' "$version" > "$candidate/$UI_GENERATION_VERSION_FILE" \
@@ -939,6 +949,10 @@ ui_generation_stage_tree() {
        || ! _ui_generation_merge_previous_primary_assets "$root" "$candidate" "$current" \
        || ! _ui_generation_normalize_candidate "$root" "$candidate" \
        || ! _ui_generation_stable_urls_remain_available "$root" "$current" "$candidate"; then
+        staged_rc=1
+    fi
+    umask "$entry_umask"
+    if [[ "$staged_rc" != 0 ]]; then
         ui_generation_cleanup_candidate "$root" "$candidate" || true
         return 1
     fi
