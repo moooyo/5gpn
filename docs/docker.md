@@ -82,11 +82,19 @@ ${EDITOR:-vi} docker/bootstrap/config.env
 install -m 0600 /dev/null docker/bootstrap/cloudflare_api_token
 ${EDITOR:-vi} docker/bootstrap/cloudflare_api_token
 
-sudo chown 10001:10001 \
-  docker/bootstrap/config.env docker/bootstrap/cloudflare_api_token
-sudo chmod 0600 \
-  docker/bootstrap/config.env docker/bootstrap/cloudflare_api_token
+# The container runs as UID:GID 10001:10001 with every capability dropped, so a
+# root-owned mode-0600 file is unreadable to it. Give the token to that group,
+# or chown it to that identity; either works.
+sudo chgrp 10001 docker/bootstrap/cloudflare_api_token
+sudo chmod 0640 docker/bootstrap/cloudflare_api_token
 ```
+
+`config.env` needs no particular mode or owner. It holds a domain, two IPv4
+addresses, an email, and a certificate mode — no secret — so it only has to be a
+regular file this container can read. Only the token is subject to the ownership
+constraint above, and that constraint is the kernel's, not this project's: a
+world-readable token starts the gateway and logs a warning rather than refusing,
+because how private your token is remains your decision.
 
 The Cloudflare file contains the raw API token and nothing else. Use a token
 scoped to `Zone:DNS:Edit` for the selected zone. Fixed identity
@@ -222,9 +230,21 @@ signed profiles, is intentional.
 
 ## Controller secret
 
-The secret is generated only for a fresh operator YAML. To display it, protect
-the terminal and its scrollback, then run the same owner-scoped Core inspector
-used by bootstrap:
+The secret is generated only for a fresh operator YAML, and the boot that
+generates it prints it once:
+
+```
+[OK]   ==================== CONTROLLER SECRET ====================
+[OK]   <64 hex characters>
+```
+
+Read it from `docker compose logs gateway` on that first boot and store it. It
+is your Console login. Because it lands in the container log, it is as private
+as `docker logs` on that host; rotate it in the operator YAML if that is not
+private enough. Later boots reuse the existing YAML and print nothing.
+
+To display it afterwards, protect the terminal and its scrollback, then run the
+same owner-scoped Core inspector used by bootstrap:
 
 ```bash
 docker compose exec -T gateway /bin/sh -ec '
