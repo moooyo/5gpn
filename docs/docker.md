@@ -79,22 +79,31 @@ listener paths, certificate paths, policy, or runtime tuning.
 cp docker/bootstrap/config.env.example docker/bootstrap/config.env
 ${EDITOR:-vi} docker/bootstrap/config.env
 
-install -m 0600 /dev/null docker/bootstrap/cloudflare_api_token
 ${EDITOR:-vi} docker/bootstrap/cloudflare_api_token
+```
 
-# The container runs as UID:GID 10001:10001 with every capability dropped, so a
-# root-owned mode-0600 file is unreadable to it. Give the token to that group,
-# or chown it to that identity; either works.
+That is the whole configuration step. Neither file needs a particular owner or
+mode for the gateway to start.
+
+There is one tradeoff worth making deliberately. The container runs as UID:GID
+`10001:10001` with every capability dropped, so it can only read what the kernel
+lets that identity read. A file created with a normal umask is mode 0644 and it
+can read it — along with every other local user on that host. Compose cannot fix
+this for you: `uid`, `gid`, and `mode` on a file-based secret are silently
+ignored outside swarm, and Compose says so on every run.
+
+So if the token should stay private to root and the gateway, spend one more
+command. Bootstrap warns when it is readable beyond its owner and starts anyway,
+because how private your token is on your own host is your decision, not this
+project's:
+
+```bash
 sudo chgrp 10001 docker/bootstrap/cloudflare_api_token
 sudo chmod 0640 docker/bootstrap/cloudflare_api_token
 ```
 
-`config.env` needs no particular mode or owner. It holds a domain, two IPv4
-addresses, an email, and a certificate mode — no secret — so it only has to be a
-regular file this container can read. Only the token is subject to the ownership
-constraint above, and that constraint is the kernel's, not this project's: a
-world-readable token starts the gateway and logs a warning rather than refusing,
-because how private your token is remains your decision.
+`config.env` never needs this. It holds a domain, two IPv4 addresses, an email,
+and a certificate mode — no secret at all.
 
 The Cloudflare file contains the raw API token and nothing else. Use a token
 scoped to `Zone:DNS:Edit` for the selected zone. Fixed identity
