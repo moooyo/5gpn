@@ -179,7 +179,12 @@ plans, design handoffs, and git history are context only.
   same digest-pinned release artifacts from those repositories; neither builds
   their source here. The single authority is `release/pins.env`, parsed through
   `release/pins.sh`; do not scrape coordinates from `install.sh` or create a
-  Docker-only lock. A shared review-contract change updates the Mihomo and
+  Docker-only lock. A complete pin value may appear in exactly two files:
+  `release/pins.env` and `THIRD_PARTY_NOTICES.md`. Anywhere else — a runbook, a
+  handoff note, a commit message quoting evidence — describe the pinned pair by
+  role and name the field; never repeat the digest.
+  `tests/test_release_artifact_binding.sh` enforces this.
+  A shared review-contract change updates the Mihomo and
   Zashboard tags and SHA-256 pins together in one root-repository commit; do
   not publish an intentionally mixed Core/Console pair.
 
@@ -396,6 +401,24 @@ Run checks proportional to the touched surface:
 for t in tests/test_*.sh; do bash "$t"; done
 tests/verify-artifact-pins.sh
 ```
+
+That loop runs under `set -e` in CI, so the first failing suite hides every
+suite after it. A short green run is not a broad one — check how far it got.
+
+**A passing suite is only evidence if you know what it read.** Two of these
+suites have silently depended on the machine rather than the code: one on a
+`/run/5gpn` that only a running host gateway creates, so it passed on `test-env`
+and failed on every clean runner; another on the caller's umask, so it passed as
+root and under CI's `0022` and failed only on a login shell with `0002`. Both
+were green for days in the place people looked. When a check reads the
+filesystem, ask what it is really reading before trusting the verdict, and
+prefer asserting the property that matters over one environment's default.
+
+**A path that has never executed is not evidence, however many gates precede
+it.** The Docker image build, the first real Cloudflare issuance, and the
+release job's image step each failed on first contact after passing every static
+gate — because no static gate can see a real certificate, a real registry, or a
+real working tree. Treat "this has never run" as a defect risk in itself.
 
 CI also renders the seed and validates it with digest-pinned mihomo. The same
 downloaded pinned Core must execute `5gpn-state validate --owner-uid` against

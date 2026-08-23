@@ -291,19 +291,28 @@ harness cannot produce release evidence by repeating an expected commit string.
 
 Build only through
 [`docker/build-candidate-image.sh`](../docker/build-candidate-image.sh). The
-release workflow runs the same script, and it refuses to publish unless its
-rebuild reproduces the accepted image ID exactly. Any other build — a bare
-`docker build`, the default builder, an unset `SOURCE_DATE_EPOCH` — can pass
-acceptance and then fail that comparison with no useful diagnostic.
+release workflow runs the same script, so the image a maintainer accepts and the
+image that ships are built by identical steps. Any other build — a bare
+`docker build`, the default builder, an unset `SOURCE_DATE_EPOCH` — reintroduces
+exactly the drift that having one definition prevents.
 
-`--tag` must be the exact tag that will later be pushed. It becomes `VERSION`,
-lands in `org.opencontainers.image.version`, and therefore changes the image
-ID, so the tag string has to be decided before acceptance rather than after.
+**An accepted image ID does not carry forward.** Both `--tag` and the commit
+land in labels — `org.opencontainers.image.version` and
+`org.opencontainers.image.revision` — and labels are inside the image config
+digest. So the image ID changes with every new commit *and* every tag string.
+Decide the tag before acceptance, and re-run acceptance after any commit that
+moves the candidate, however unrelated the change looks.
 
 ```bash
 image_id="$(bash docker/build-candidate-image.sh --tag X.Y.Z)"
 echo "$image_id"
 ```
+
+On a host that cannot reach `registry-1.docker.io` — `test-env` resolves it to a
+poisoned address, so `docker buildx create` cannot pull the driver image — set
+`FIVEGPN_BUILD_REGISTRY_MIRROR=mirror.gcr.io`, which serves all three pinned
+references. It cannot change the result: every reference it fetches stays
+digest-pinned. Hosted CI leaves the variable unset and is unaffected.
 
 The build must run from a clean checkout of the commit that will be tagged.
 Because the release workflow requires the tagged commit to be reachable from
