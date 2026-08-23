@@ -691,12 +691,14 @@ prepare_cloudflare_credential() {
     local token file_size token_size last_byte candidate cf_mode
     readable_input_file "$CF_SECRET" \
         || fatal "Cloudflare API token must be a readable regular file at $CF_SECRET. This container runs as UID:GID ${CURRENT_UID}:${CURRENT_GID} with all capabilities dropped, so a root-owned mode-0600 file is unreadable to it. Give it to that identity (chown ${CURRENT_UID}) or to its group (chgrp ${CURRENT_GID} and chmod 0640)."
-    # A world-readable token still works, and refusing to start over it would be
-    # this code overriding a choice that is the operator's to make. Say so once
-    # and continue.
+    # A token other local users can *read* is the documented default: a file
+    # created with an ordinary umask is 0644, and warning about the path this
+    # project tells operators to take would just teach them to ignore warnings.
+    # A token they can *write* is a different thing -- anyone with a local
+    # foothold could swap in their own -- and no default produces it.
     cf_mode="$(path_mode "$CF_SECRET" 2>/dev/null || true)"
-    if [[ "$cf_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$cf_mode & 0044) != 0 )); then
-        warn "The Cloudflare API token at $CF_SECRET is mode $cf_mode, readable beyond its owner. It grants DNS edit rights on your zone; consider 0600 or 0640."
+    if [[ "$cf_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$cf_mode & 0022) != 0 )); then
+        warn "The Cloudflare API token at $CF_SECRET is mode $cf_mode, writable by group or other. Another local user could replace it with their own; consider chmod go-w."
     fi
     file_size="$(wc -c < "$CF_SECRET" | tr -d '[:space:]')"
     [[ "$file_size" =~ ^[0-9]+$ && "$file_size" -gt 0 && "$file_size" -le 4096 ]] \

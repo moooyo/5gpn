@@ -85,25 +85,29 @@ ${EDITOR:-vi} docker/bootstrap/cloudflare_api_token
 That is the whole configuration step. Neither file needs a particular owner or
 mode for the gateway to start.
 
-There is one tradeoff worth making deliberately. The container runs as UID:GID
-`10001:10001` with every capability dropped, so it can only read what the kernel
-lets that identity read. A file created with a normal umask is mode 0644 and it
-can read it — along with every other local user on that host. Compose cannot fix
-this for you: `uid`, `gid`, and `mode` on a file-based secret are silently
-ignored outside swarm, and Compose says so on every run.
+The container runs as UID:GID `10001:10001` with every capability dropped, so it
+can only read what the kernel lets that identity read. A file created with an
+ordinary umask is mode 0644, which it can read — along with every other local
+user on that host. On a single-operator host that is usually fine and is the
+expected default. Compose cannot narrow it for you either: `uid`, `gid`, and
+`mode` on a file-based secret are silently ignored outside swarm, and Compose
+warns about that on every run.
 
-So if the token should stay private to root and the gateway, spend one more
-command. Bootstrap warns when it is readable beyond its owner and starts anyway,
-because how private your token is on your own host is your decision, not this
-project's:
+If the token should stay private to root and the gateway — a shared host, or
+several administrators — spend one more command:
 
 ```bash
 sudo chgrp 10001 docker/bootstrap/cloudflare_api_token
 sudo chmod 0640 docker/bootstrap/cloudflare_api_token
 ```
 
-`config.env` never needs this. It holds a domain, two IPv4 addresses, an email,
-and a certificate mode — no secret at all.
+Bootstrap does not warn about a readable token, because that is the documented
+default and warning about it would only teach operators to ignore warnings. It
+does warn about one that is group- or other-**writable**, which no default
+produces and which would let another local user replace your token.
+
+`config.env` never needs any of this. It holds a domain, two IPv4 addresses, an
+email, and a certificate mode — no secret at all.
 
 The Cloudflare file contains the raw API token and nothing else. Use a token
 scoped to `Zone:DNS:Edit` for the selected zone. Fixed identity
