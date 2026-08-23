@@ -16,7 +16,7 @@ records only where the Docker delivery stands and what to do next.
 | Offline gates | Green in hosted CI on `main`, which is the gate that counts. Do not read a green `test-env` run as equivalent: until 2026-08-22 the suites passed there and failed on every clean runner, because `tests/test_docker_certificate_helpers.sh` depended on a `/run/5gpn` that only the host gateway's presence created. CI had been red on `main` for two days, and `set -euo pipefail` aborted the shell job at the seventh suite, so most suites were not running at all. |
 | Image build | Works, and is reproducible — two from-scratch builds of one commit, builder torn down and tree `git clean -xfd`ed in between, produced the identical image ID. |
 | Cloudflare DNS-01 | **Works end to end as of 2026-08-22**, verified against a real zone. This was never true before: the first live run obtained a correct wildcard and was then rejected by three of this repository's own assertions. See "What the first real issuance cost". |
-| Release acceptance | **PASSED 2026-08-22**, release mode, against `a345d55` and image `sha256:16753c58…` on the disposable Docker target. First time it has ever run. Interception, DoT steering, SNI sniffing, and the extension lifecycle were verified alongside it. |
+| Release acceptance | **PASSED 2026-08-22**, release mode, on the disposable Docker target. It ran three times that day, once per candidate commit, because the revision label sits in the config digest and every new commit is a different image. The run that backs the published tag is `e884aa9`. Interception, DoT steering, SNI sniffing, and the extension lifecycle were verified alongside it. |
 | Published artifacts | **`0.0.82-beta.2`, 2026-08-22** — the first Docker delivery ever published. GitHub pre-release with the three installer assets, plus `ghcr.io/moooyo/5gpn:0.0.82-beta.2`. Stable `latest` still points at `0.0.81`, as the beta channel requires. |
 
 **Next action:** none outstanding for the beta. Promoting to a stable `X.Y.Z`
@@ -120,7 +120,8 @@ downstream will catch skipping it.
    `docker/build-candidate-image.sh`, which the release workflow also calls, so
    the two cannot drift.
 7. ~~Run `tests/container-acceptance.sh` in release mode against the exact image
-   on the disposable Docker target.~~ **Passed 2026-08-22** against `a345d55`.
+   on the disposable Docker target.~~ **Passed 2026-08-22**, most recently
+   against `e884aa9`, the commit `0.0.82-beta.2` was cut from.
    Re-run it against whatever commit is actually tagged; the image ID changes
    with the revision label, so a passing run does not carry forward.
 
@@ -142,14 +143,15 @@ downstream will catch skipping it.
    - a candidate with zero installed extensions, or the extension probe aborts.
 
    The run is mutating: it stops, renames, and re-creates the container.
-8. ~~Record the run's evidence.~~ Done for `a345d55`:
+8. ~~Record the run's evidence.~~ Done for `e884aa9`, the commit behind
+   `0.0.82-beta.2`:
 
    | | |
    |---|---|
-   | accepted commit | `a345d55a718c28b1320775ac71741a4da7c64713` |
-   | accepted image ID | `sha256:16753c5803bbb3c8170d7ab52465f7ecce7f1363006f602d1e50be7a7e3ba61d` |
+   | accepted commit | `e884aa960a452dcda37d112b5b501d3c98fa1daf` |
+   | accepted image ID | `sha256:016332b95c04935048fecad5a4d558ddd33196a6f243dd3cf3a38cebbdfe1ebe` |
    | pinned Core digest | the `MIHOMO_SHA256` in `release/pins.env` at that commit — pin values may appear in exactly two files, and this is not one of them |
-   | probe bundle | `39262f0005e1b3ee849c67faefd8c7e62fe11fa60b0b22c125a1a8e5123d32f7` |
+   | probe bundle | `344f60be3e7056e183569aacbaad0913573f23e02fe2646be3f9f5545cd5e427` |
 
    Nothing consumes these. They are here so a later reader can tell which image
    and which probes this tag was accepted against.
