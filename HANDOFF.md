@@ -88,7 +88,7 @@ release-mode acceptance invocation.
 
 ## Release blockers and required order
 
-Steps 1-8 are complete. Only publication remains.
+All nine steps are complete; `0.0.82-beta.2` is published.
 
 Publication is no longer gated on a record of the acceptance run. Three hand-set
 repository variables used to stand there, and the release job compared its own
