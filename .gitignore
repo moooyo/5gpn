@@ -29,3 +29,6 @@ __pycache__/
 # Scratch probes written by exploratory tooling; never part of the tree.
 zz_*_test.go
 *_probe_test.go
+
+# Local editor/preview scratch. Nothing here is part of the delivery.
+/.claude/
