@@ -184,8 +184,8 @@ cert_line="$(grep -nF 'run_sync "$INTERCEPT_CERT_HELPER" init-ca' <<<"$main_body
 public_cert_line="$(grep -nF 'bootstrap_public_certificate' <<<"$main_body" | tail -1 | cut -d: -f1)"
 if grep -Fq 'exec "$MIHOMO_BIN"' "$ENTRYPOINT" \
    && grep -Fq 'wait "$child_pid"' "$ENTRYPOINT" \
-   && grep -Fq 'safe_private_input_file "$BOOTSTRAP_INPUT"' "$ENTRYPOINT" \
-   && grep -Fq 'safe_private_input_file "$CF_SECRET"' "$ENTRYPOINT" \
+   && grep -Fq 'readable_input_file "$BOOTSTRAP_INPUT"' "$ENTRYPOINT" \
+   && grep -Fq 'readable_input_file "$CF_SECRET"' "$ENTRYPOINT" \
    && grep -Fq 'Docker supports only CERT_MODE=cloudflare.' "$ENTRYPOINT" \
    && grep -Fq '5gpn-container-runtime-v2' "$ENTRYPOINT" \
    && grep -Fq '5gpn-state validate --owner-uid "$CURRENT_UID"' "$ENTRYPOINT" \
@@ -229,6 +229,22 @@ if grep -Fq 'exec "$MIHOMO_BIN"' "$ENTRYPOINT" \
     pass "entrypoint performs the current read-only preflight before any state or certificate publication"
 else
     fail "entrypoint bypasses the v2 state, controller, legacy, UI, or publication boundary"
+fi
+
+# The controller secret is printed so a first-time operator can reach the
+# Console without an owner-scoped Core inspection they would have to look up.
+# It must be printed only from the branch that generates it: a boot that reuses
+# an existing operator YAML has no business re-emitting the credential into the
+# container log, and re-reading it from the YAML to print it would be exactly
+# the mirroring the six-key dns.env contract forbids.
+seed_body="$(sed -n '/^prepare_mihomo_config()/,/^}/p' "$ENTRYPOINT")"
+secret_print_count="$(grep -Fc 'CONTROLLER SECRET' "$ENTRYPOINT")"
+if [[ -n "$seed_body" && "$secret_print_count" == 1 ]] \
+   && grep -Fq 'CONTROLLER SECRET' <<<"$seed_body" \
+   && grep -Fq 'openssl rand -hex 32' <<<"$seed_body"; then
+    pass "the controller secret is printed only where it is generated"
+else
+    fail "the controller secret is printed outside its generation branch"
 fi
 
 if command -v jq >/dev/null 2>&1 \

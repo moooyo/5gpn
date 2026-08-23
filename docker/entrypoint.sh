@@ -67,7 +67,19 @@ PERSISTED_DNS_ENV=0
 
 info() { printf '[INFO] %s\n' "$*"; }
 ok() { printf '[OK]   %s\n' "$*"; }
+warn() { printf '[!]    %s\n' "$*" >&2; }
 fatal() { printf '[ERR]  %s\n' "$*" >&2; exit 1; }
+
+# Bootstrap inputs the operator supplies by hand. These deliberately do not
+# assert an exact mode or owner. The container runs as a fixed non-root UID with
+# every capability dropped, so the kernel already decides what it can read, and
+# adding a second stricter opinion on top only turned working files into a
+# startup failure. What is checked is what this code actually depends on: a real
+# file it can read, not a symlink to somewhere else.
+readable_input_file() {
+    local path="$1"
+    [[ -f "$path" && ! -L "$path" && -r "$path" ]]
+}
 
 request_shutdown() {
     shutdown_requested=1
@@ -236,11 +248,6 @@ safe_current_plain_file() {
        && "$(path_nlink "$path")" == 1 ]]
 }
 
-safe_private_input_file() {
-    local path="$1"
-    safe_current_plain_file "$path" && [[ "$(path_mode "$path")" == 600 ]]
-}
-
 safe_exact_marker() {
     local path="$1" mode="$2" value="$3"
     safe_current_plain_file "$path" \
@@ -280,8 +287,8 @@ trim() {
 declare -A BOOTSTRAP=()
 prepare_bootstrap_config() {
     local size candidate
-    [[ -r "$BOOTSTRAP_INPUT" ]] && safe_private_input_file "$BOOTSTRAP_INPUT" \
-        || fatal "Bootstrap configuration input must be one mode-0600 file owned by container UID:GID ${CURRENT_UID}:${CURRENT_GID}: $BOOTSTRAP_INPUT"
+    readable_input_file "$BOOTSTRAP_INPUT" \
+        || fatal "Bootstrap configuration must be a readable regular file at $BOOTSTRAP_INPUT. It holds no secret, so no particular mode or owner is required -- only that this container, running as UID:GID ${CURRENT_UID}:${CURRENT_GID}, can read it."
     size="$(wc -c < "$BOOTSTRAP_INPUT" | tr -d '[:space:]')"
     [[ "$size" =~ ^[0-9]+$ && "$size" -gt 0 && "$size" -le 65536 ]] \
         || fatal "Bootstrap configuration input has an invalid size."
@@ -681,9 +688,16 @@ preflight_certificate_state() {
 }
 
 prepare_cloudflare_credential() {
-    local token file_size token_size last_byte candidate
-    [[ -r "$CF_SECRET" ]] && safe_private_input_file "$CF_SECRET" \
-        || fatal "Cloudflare API token secret must be one mode-0600 file owned by container UID:GID ${CURRENT_UID}:${CURRENT_GID}: $CF_SECRET"
+    local token file_size token_size last_byte candidate cf_mode
+    readable_input_file "$CF_SECRET" \
+        || fatal "Cloudflare API token must be a readable regular file at $CF_SECRET. This container runs as UID:GID ${CURRENT_UID}:${CURRENT_GID} with all capabilities dropped, so a root-owned mode-0600 file is unreadable to it. Give it to that identity (chown ${CURRENT_UID}) or to its group (chgrp ${CURRENT_GID} and chmod 0640)."
+    # A world-readable token still works, and refusing to start over it would be
+    # this code overriding a choice that is the operator's to make. Say so once
+    # and continue.
+    cf_mode="$(path_mode "$CF_SECRET" 2>/dev/null || true)"
+    if [[ "$cf_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$cf_mode & 0044) != 0 )); then
+        warn "The Cloudflare API token at $CF_SECRET is mode $cf_mode, readable beyond its owner. It grants DNS edit rights on your zone; consider 0600 or 0640."
+    fi
     file_size="$(wc -c < "$CF_SECRET" | tr -d '[:space:]')"
     [[ "$file_size" =~ ^[0-9]+$ && "$file_size" -gt 0 && "$file_size" -le 4096 ]] \
         || fatal "Cloudflare API token secret has an invalid size."
@@ -803,6 +817,19 @@ prepare_mihomo_config() {
     sync -f "$MIHOMO_HOME" \
         || fatal "Operator config rename committed, but directory durability is unconfirmed."
     ok "Initial operator-owned mihomo config published."
+    # Printed once, only on the boot that generates it. Reading it back later
+    # needs an owner-scoped Core inspection that is awkward to type from memory,
+    # and an operator who cannot reach the Console has no way in. This lands in
+    # the container log, so it is as private as `docker logs` on this host: read
+    # it, store it, and rotate it in the operator YAML if that is not private
+    # enough. Later boots reuse the existing YAML and print nothing.
+    printf '\n'
+    printf '[OK]   ==================== CONTROLLER SECRET ====================\n'
+    printf '[OK]   %s\n' "$secret"
+    printf '[OK]   Shown once, on this first boot only. It is stored in\n'
+    printf '[OK]   /etc/5gpn/mihomo/config.yaml and is your Console login.\n'
+    printf '[OK]   ===========================================================\n'
+    printf '\n'
 }
 
 write_dns_env() {
