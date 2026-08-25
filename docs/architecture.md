@@ -610,8 +610,7 @@ reset when a process restart, future cursor, or ring eviction makes the old
 position unusable. Filters never redefine the global sequence.
 
 Version 7 retains those surfaces and makes the feature version the exact
-operator review contract. Every installed-extension detail and every install or
-Marketplace review candidate carries `review_contract: 7`. Its `actions` are
+operator review contract. Its `actions` are
 bounded, typed `ActionReview` projections: they identify the action, matchers,
 gate, kind, body mode, timing and body limits, source form, and declarative
 parameters. Script and JQ source text, manifest bytes, and mock response body
@@ -623,6 +622,15 @@ an exact changed-action identity; the IDs, digests, and returned sequence suppor
 the Console's added, removed, changed, and reordered presentation. Neither
 replaces the candidate digest, reviewed source, document revision, or apply-time
 refetch.
+
+Version 8 keeps all of that and retires operator-configured discovery. Every
+installed-extension detail and every install or Marketplace review candidate
+carries `review_contract: 8`. The persisted `catalogs` array, the whole-list
+source write, and the source segment of the entry review and update routes are
+gone: `/5gpn/interception/catalog` now reads exactly one index whose URL is
+compiled into the core. Unlike every revision before it this is not a
+control-plane-only change, because the document it describes lost a field —
+`intercept.json` moves to schema version 7 in the same release.
 
 Four confirmation-bearing writes require the exact current contract before any
 engine mutation: fresh install apply, Marketplace update apply, complete
@@ -636,16 +644,15 @@ its compiled-in constant, and always sends that local constant rather than
 echoing the server's value. A stale tab therefore either stops before issuing a
 write or sends its old constant and is rejected by a newer core.
 
-This control-plane change does not create a new persisted authorization epoch.
-`intercept.json` remains current schema version 6, and an already enabled
-current-schema snapshot remains authorized when a v7 core loads it. The v7 gate
-applies to the next install, Marketplace update, reorder, or enable operation;
-disabling that snapshot remains possible without a contract, while enabling it
-again requires the current contract. A Console and core must still match the
+This is the first feature revision that moves the persisted document with it, so
+there is no grandfathered state to describe. `intercept.json` is current schema
+version 7. A version 6 document is refused at decode rather than migrated — it
+always carried the retired `catalogs` key, and this project does not carry
+superseded keys forward. A Console and core must still match the
 feature version exactly; a client must not infer any of these routes or fields
 from an older version.
 
-Catalog review resolves its configured source and installed-state projection
+Catalog review resolves its installed-state projection
 from one committed interception revision. If that document changes while the
 catalog or manifest is being fetched, review returns a revision conflict rather
 than pairing an old source with a newer revision.
@@ -690,28 +697,34 @@ apply; the existing explicit egress binding is retained. Neither condition
 silently disables the extension.
 
 `/5gpn/interception/catalog` is explicit discovery, installation, and update
-selection. A fresh interception document has `catalogs: []`: there is no
-built-in publisher and no marketplace request until an authenticated operator
-adds an HTTPS source through the Console. A catalog is a list of manifests: it
+selection. It reads one index, at a URL compiled into the core:
+`https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json`. There is
+no persisted source list, no operator-added publisher, and no route that adds,
+renames, or removes one — an operator's discovery choices are which entry to
+review and whether to apply it, not where the listing comes from. A catalog is
+still only a list of manifests: it
 is fetched through the same guarded client an import uses and is never
 persisted. Selecting an entry runs the same review-then-confirm boundary as a
 fresh import. For an installed ID, that explicit selection authorizes changing
-the source to the reviewed entry; merely adding or refreshing a catalog never
+the source to the reviewed entry; merely refreshing the index never
 changes installed code.
 
 What a catalog is allowed to do is contradict itself, and that is checked. An
 entry states the manifest's SHA-256 and the shape of what it declares; if the
 fetched manifest disagrees, the review is refused rather than returned with a
 footnote, because the review is the screen where the operator decides and a
-wrong description reaching it is the whole failure. The index is decoded
+wrong description reaching it is the whole failure. Being first-party does not
+exempt the index from that check: it is fetched over the network like any other,
+and the review screen is still the last place a divergence can be caught. The
+index is decoded
 leniently: it is a contract with every deployed gateway, so rejecting unknown
-fields would make older cores refuse whole catalogs whenever a publisher added
+fields would make older cores refuse the whole catalog whenever a publisher added
 something for newer ones.
 
-A successful fetch atomically replaces one source's complete in-memory index.
+A successful fetch atomically replaces the complete in-memory index.
 Network, JSON, duplicate-field, or partially invalid entry failures retain the
 last complete snapshot regardless of its cache age and return it together with
-an explicit source error. A source that has never succeeded reports the same
+an explicit fetch error. An index that has never succeeded reports the same
 error with an empty list. Cache TTL schedules another fetch; it never converts
 stale discovery data into an apparent publisher deletion.
 
@@ -956,15 +969,15 @@ their separate ordering and durability contracts.
 There are three documents. `dns.json` is the resolver: listeners, gateway
 address, the two upstream groups and their client subnet, the ordered policy,
 and the handful of knobs with no correct universal value. `intercept.json` is
-the interception engine: the master switch, the protocol settings, the
-configured extension catalogs, and the installed extensions with their immutable
+the interception engine: the master switch, the protocol settings, and the
+installed extensions with their immutable
 snapshots and the operator's own bindings. `bot.json` is the Telegram control
 plane: the switch, the token, the admin set and whether alerts are on.
 
-The configured catalog list starts as an explicit empty array. No official or
-third-party source is seeded, because contacting a publisher is an operator
-trust decision. The authenticated Console is the only management surface that
-adds marketplace URLs.
+Where the marketplace is read from is not among them. It is one URL compiled
+into the core, so there is nothing to persist, nothing to write, and nothing for
+two tabs to disagree about. An operator who wants a different publisher is
+asking for a different build, not a different document.
 
 The bot is its own document rather than a field on either of the others,
 because it is neither: the resolver document is what the gateway answers with
@@ -1320,10 +1333,10 @@ rollback claim.
 
 Mihomo-internal runtime behavior is owned by the immutable acceptance documents
 at commit
-[`aba0cfcea5ebeda580ab63e174fd17146c3ef962`](https://github.com/moooyo/mihomo/tree/aba0cfcea5ebeda580ab63e174fd17146c3ef962/acceptance).
+[`4be94ddca0b2484b3fa043b598f32e5a6815fe2e`](https://github.com/moooyo/mihomo/tree/4be94ddca0b2484b3fa043b598f32e5a6815fe2e/acceptance).
 Console rendering and interaction behavior is owned by the immutable zashboard
 runbook at commit
-[`cf3d018ffa20eae0297c434b7a185b0d69f43b66`](https://github.com/moooyo/zashboard/blob/cf3d018ffa20eae0297c434b7a185b0d69f43b66/docs/5gpn-console-acceptance.md).
+[`a94335035d069f43306817aa4bda05026d6ef048`](https://github.com/moooyo/zashboard/blob/a94335035d069f43306817aa4bda05026d6ef048/docs/5gpn-console-acceptance.md).
 That runbook permits some restored controller mutations on an explicitly
 designated current-schema gateway, but root release/acceptance scheduling does
 not inherit that permission. Every zashboard controller mutation dispatched by
@@ -1346,7 +1359,7 @@ contents, but it cannot prove writable cgroup delegation. The exact candidate
 therefore runs on a disposable Engine 28, cgroup-v2 target reached through
 `test-env`, never on the working gateway. That acceptance covers the real
 startup probe, an extension worker operation, worker OOM containment,
-authenticated capability version 7, certificate hot publication, container
+authenticated capability version 8, certificate hot publication, container
 recreation, and persistence across both named volumes. It is a maintainer's
 obligation before tagging, not a machine check afterwards: publication is bound
 to the image the release job itself builds and pushes, and verifies the pushed

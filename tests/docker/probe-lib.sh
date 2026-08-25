@@ -66,7 +66,7 @@ wait_for_authenticated_capabilities() {
            && jq -e '
                 .controllerApi == "1" and
                 .features["5gpn-dns"].version == 2 and
-                .features["5gpn-interception"].version == 7
+                .features["5gpn-interception"].version == 8
               ' <<<"$payload" >/dev/null; then
             return 0
         fi

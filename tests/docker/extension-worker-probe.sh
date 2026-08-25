@@ -155,7 +155,7 @@ candidate_digest="$(jq -er \
     '.candidate.digest as $digest |
      select($digest | test("^[0-9a-f]{64}$")) |
      select((.candidate.installed // "") == "") |
-     select(.candidate.detail.review_contract == 7) |
+     select(.candidate.detail.review_contract == 8) |
      select(.candidate.detail.capture_hosts == [$host]) |
      select((.candidate.detail.actions | map(.id)) == ["memory-bomb","healthy"]) |
      select(all(.candidate.detail.actions[];
@@ -169,7 +169,7 @@ install_attempted=true
 install="$(api_request POST /5gpn/interception/extensions \
     "$(jq -nc --arg revision "$review_revision" --arg digest "$candidate_digest" \
         --arg content "$manifest" \
-        '{revision:$revision,review_contract:7,digest:$digest,content:$content}')")"
+        '{revision:$revision,review_contract:8,digest:$digest,content:$content}')")"
 installed=true
 jq -e --arg id "$extension_id" --arg digest "$candidate_digest" '
   (.snapshot.modules[] | select(.id == $id) | .enabled) == false and
@@ -192,7 +192,7 @@ fi
 
 enable="$(api_request PUT "/5gpn/interception/extensions/${extension_id}/enabled" \
     "$(jq -nc --arg revision "$(current_revision)" \
-        '{revision:$revision,review_contract:7,enabled:true}')")"
+        '{revision:$revision,review_contract:8,enabled:true}')")"
 enabled_revision="$(jq -er .revision <<<"$enable")"
 jq -e --arg id "$extension_id" '
   (.snapshot.modules[] | select(.id == $id) | .enabled) == true and
@@ -360,7 +360,7 @@ done
 
 detail="$(api_request GET "/5gpn/interception/extensions/${extension_id}")"
 jq -e --arg digest "$candidate_digest" '
-  .extension.snapshot_digest == $digest and .extension.review_contract == 7 and
+  .extension.snapshot_digest == $digest and .extension.review_contract == 8 and
   (.extension.actions | map(.id)) == ["memory-bomb","healthy"] and
   all(.extension.actions[]; (.review_digest | test("^[0-9a-f]{64}$")))
 ' <<<"$detail" >/dev/null \

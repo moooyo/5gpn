@@ -39,17 +39,17 @@ release/acceptance policy.
 
 Runtime behavior implemented inside mihomo is accepted in the mihomo
 repository at immutable documentation commit
-[`aba0cfcea5ebeda580ab63e174fd17146c3ef962`](https://github.com/moooyo/mihomo/commit/aba0cfcea5ebeda580ab63e174fd17146c3ef962):
+[`4be94ddca0b2484b3fa043b598f32e5a6815fe2e`](https://github.com/moooyo/mihomo/commit/4be94ddca0b2484b3fa043b598f32e5a6815fe2e):
 
-- [read-only runtime smoke](https://github.com/moooyo/mihomo/blob/aba0cfcea5ebeda580ab63e174fd17146c3ef962/acceptance/runtime-smoke.md)
-- [disposable runtime acceptance](https://github.com/moooyo/mihomo/blob/aba0cfcea5ebeda580ab63e174fd17146c3ef962/acceptance/runtime-disposable.md)
-- [runtime acceptance ownership and evidence rules](https://github.com/moooyo/mihomo/blob/aba0cfcea5ebeda580ab63e174fd17146c3ef962/acceptance/README.md)
+- [read-only runtime smoke](https://github.com/moooyo/mihomo/blob/4be94ddca0b2484b3fa043b598f32e5a6815fe2e/acceptance/runtime-smoke.md)
+- [disposable runtime acceptance](https://github.com/moooyo/mihomo/blob/4be94ddca0b2484b3fa043b598f32e5a6815fe2e/acceptance/runtime-disposable.md)
+- [runtime acceptance ownership and evidence rules](https://github.com/moooyo/mihomo/blob/4be94ddca0b2484b3fa043b598f32e5a6815fe2e/acceptance/README.md)
 
 Browser rendering and Console interaction are accepted in the zashboard
 repository at immutable documentation commit
-[`cf3d018ffa20eae0297c434b7a185b0d69f43b66`](https://github.com/moooyo/zashboard/commit/cf3d018ffa20eae0297c434b7a185b0d69f43b66):
+[`a94335035d069f43306817aa4bda05026d6ef048`](https://github.com/moooyo/zashboard/commit/a94335035d069f43306817aa4bda05026d6ef048):
 
-- [5gpn Console acceptance](https://github.com/moooyo/zashboard/blob/cf3d018ffa20eae0297c434b7a185b0d69f43b66/docs/5gpn-console-acceptance.md)
+- [5gpn Console acceptance](https://github.com/moooyo/zashboard/blob/a94335035d069f43306817aa4bda05026d6ef048/docs/5gpn-console-acceptance.md)
 
 The immutable zashboard runbook permits some restored controller mutations on
 an explicitly designated current-schema gateway. Root release/acceptance

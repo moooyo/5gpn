@@ -146,15 +146,23 @@ plans, design handoffs, and git history are context only.
   HTTP(S) capture hosts remain rejected while unrelated traffic returns to the
   operator rules. Readiness restoration republishes the same projection without
   a document revision or operator write.
-- `5gpn-interception` capability 7 is also review contract 7; persisted
-  `intercept.json` remains version 6. Installed details and review candidates
+- `5gpn-interception` capability 8 is also review contract 8; persisted
+  `intercept.json` is version 7. Installed details and review candidates
   expose structured, bounded, body-free `ActionReview` entries with one
   deterministic `review_digest` per action. Fresh install apply, Marketplace
   update apply, complete reorder, and enable require the exact contract before
   mutation. Disable treats a missing, null, or zero value as omitted so
   revocation remains available; nonzero stale and future versions are rejected.
-  Existing current-schema enabled snapshots remain authorized when v7 loads;
-  do not invent an authorization epoch or disable them during upgrade.
+  A version 6 document carries the retired `catalogs` key and is refused at
+  decode; do not add a migration, a lenient decode, or a compatibility alias
+  for it.
+- The marketplace index URL is compiled into the core and is not configuration.
+  There is no persisted `catalogs` array, no source list, and no route that
+  adds, renames, removes, enables, or disables a marketplace. Do not reintroduce
+  one, and do not seed the URL into a document instead — a default only ever
+  reaches an absent document, which is how extension discovery once shipped dark
+  on every existing host. Operator-supplied *extension* URLs are a different
+  surface and stay: Install from URL and local add are untouched.
 - The installer does not roll back. A failure before project publication leaves
   5gpn-managed services, accounts, units, and live files untouched; dependency
   installation may already have changed shared distribution package state and
@@ -351,7 +359,7 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   and end-to-end headers, potentially including `Cookie` or `Authorization`.
   Reordering also requires review
   because it changes action, egress, and global routing first-match precedence.
-  At review contract 7, render each action from its typed `ActionReview`; never
+  At review contract 8, render each action from its typed `ActionReview`; never
   fall back to raw manifest/action JSON or expose manifest, script, JQ, or mock
   body bytes. Classify added, removed, changed, and reordered actions by action
   ID, `review_digest`, and sequence. Treat the returned `review_contract` as an
@@ -362,8 +370,10 @@ All operator-facing shell scripts use the established gum-or-echo pattern.
   `/extensions/hosts` owns searchable, per-plugin capture-host and egress-winner
   auditing; do not move plugin management back into Settings.
 - Marketplace discovery lives on the separate top-level `/marketplace` route,
-  never inside the installed-plugin page. Source aliases are local display text,
-  not publisher identity. Do not fabricate popularity, author, health, or update
+  never inside the installed-plugin page. The page reads the one built-in index
+  and offers no control that adds, renames, removes, enables, or disables a
+  source; label it from the index's own metadata, never from operator text.
+  Do not fabricate popularity, author, health, or update
   metadata that the authenticated marketplace API does not provide. An entry is
   current when the gateway proves the installed version and manifest digest
   match the catalog; version equality or `installed_version` truthiness alone

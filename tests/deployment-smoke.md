@@ -192,7 +192,7 @@ auth_get() {
   and `/proxies`. Error bodies contain neither the real secret nor plugin-log
   text.
 - [ ] `auth_get "https://$CONSOLE/capabilities"` returns
-  `controllerApi: "1"`, DNS capability 2, interception capability 7, and bot
+  `controllerApi: "1"`, DNS capability 2, interception capability 8, and bot
   capability 1 when the bot surface is present. The authenticated DNS,
   interception, configuration, and proxy reads return 200.
 - [ ] No `/proxy/` origin, second panel SNI, source allowlist, handoff session,

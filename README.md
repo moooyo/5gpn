@@ -373,7 +373,7 @@ operations.
 | `/etc/5gpn/dns.env` | Exactly six installer inputs: base domain, public/gateway/listener IPv4 values, certificate mode, and certificate email |
 | `/etc/5gpn/mihomo/config.yaml` | 运维者完整拥有的 mihomo 配置 |
 | `/etc/5gpn/mihomo/5gpn/dns.json` | Ordered DNS policy, upstreams, subscriptions, and resolver settings |
-| `/etc/5gpn/mihomo/5gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, catalogs, and extension snapshots |
+| `/etc/5gpn/mihomo/5gpn/intercept.json` | Interception master, fixed-false HTTP/3 marker, and extension snapshots |
 | `/etc/5gpn/mihomo/5gpn/bot.json` | Telegram switch, token, administrators, and alerts |
 
 Normal install, current-schema reinstall, and `configure` validate an existing mihomo file with `5gpn-mihomo -t` and the exact root-only controller inspector, then preserve it byte for byte. Only explicit `mihomo-reset` may replace it after backup, complete validation, and atomic rename; that command is not a legacy conversion path. Gateway changes update installation-owned DNS state and the dynamic Core guard after restart without rewriting operator YAML. Domain or listener changes that conflict with operator YAML still abort before publication.
@@ -462,7 +462,7 @@ Native extensions are optional, and a fresh installation has the MITM master dis
 - Every validation and action runs in a fresh, memory-isolated one-shot process containing a bounded goja VM. Linux uses delegated cgroup-v2 memory and pids controller subtrees; supported Windows execution uses a 512MiB Job Object with `ActiveProcessLimit=1`. If that hard limit cannot be established, the operation fails closed without an in-process fallback. Quota-bound storage, logs, and permitted network calls cross bounded IPC back to the main process, where network calls enter mihomo's inner dialer and current rule evaluation. The sandbox has no filesystem, process, module loader, socket, ambient `fetch`, or direct egress.
 - 每个扩展都显式绑定出口并默认 `DIRECT`；运维者可以改选已有 mihomo group，但 manifest 和脚本不能命名或修改该值。已选 group 消失时流量 fail closed，不会静默回退。启用确认中审阅的全局 routing rule 只允许 `REJECT` 或 `DIRECT`，且只在扩展与 MITM master 同时启用时存在。
 - 执行顺序会影响 action composition、重叠 host 的 egress/capture-DNS winner 和 routing first-match，因此重排也必须确认。
-- marketplace 只是 discovery metadata，不是信任根；不会自动安装、启用、更新、抓取或镜像内容。第一方扩展源码位于独立的 [moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions) 仓库，并发布[官方 marketplace index](https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json)。
+- marketplace 只是 discovery metadata，不是信任根；不会自动安装、启用、更新、抓取或镜像内容。第一方扩展源码位于独立的 [moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions) 仓库，它发布的[官方 marketplace index](https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json) 是 core 编译内置、也是唯一会被读取的来源。marketplace 来源不可配置：没有持久化的 `catalogs`，也没有添加、改名、删除或禁用来源的入口。运维者仍然可以用 Install from URL 或本地添加安装任意 manifest。
 - Plugin engine logs exist only in mihomo's 1000-entry memory ring. Pausing or clearing the Console view neither stops ingestion nor deletes that ring; the log disappears when the process exits.
 
 > [!CAUTION]

@@ -362,7 +362,7 @@ if grep -Fq 'FIVEGPN_EXPECTED_COMMIT' "$ACCEPTANCE" \
    && grep -Fq 'io.5gpn.mihomo.sha256' "$ACCEPTANCE" \
    && grep -Fq '5gpn-container-runtime-v2' "$ACCEPTANCE" \
    && grep -Fq '/opt/5gpn/ui' "$ACCEPTANCE" \
-   && grep -Fq 'review_contract:7' "$ROOT/tests/docker/extension-worker-probe.sh" \
+   && grep -Fq 'review_contract:8' "$ROOT/tests/docker/extension-worker-probe.sh" \
    && [[ "$(grep -Fc 'assert_container_boundary' "$ACCEPTANCE")" -ge 3 ]] \
    && grep -Fq 'tests/docker' "$ACCEPTANCE" \
    && ! grep -Eq 'FIVEGPN_(EXTENSION|WORKER_OOM|CERT_HOT_RELOAD|RECREATE)_PROBE' "$ACCEPTANCE" \

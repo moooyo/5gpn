@@ -72,8 +72,8 @@ compare_exact_list "release acceptance document set" \
     expected_packaged_acceptance actual_packaged_acceptance
 pass "the root index and release bundle contain only the approved acceptance documents and Docker probes"
 
-MIHOMO_ACCEPTANCE_COMMIT=aba0cfcea5ebeda580ab63e174fd17146c3ef962
-ZASHBOARD_ACCEPTANCE_COMMIT=cf3d018ffa20eae0297c434b7a185b0d69f43b66
+MIHOMO_ACCEPTANCE_COMMIT=4be94ddca0b2484b3fa043b598f32e5a6815fe2e
+ZASHBOARD_ACCEPTANCE_COMMIT=a94335035d069f43306817aa4bda05026d6ef048
 
 grep -Fq "moooyo/mihomo/blob/${MIHOMO_ACCEPTANCE_COMMIT}/acceptance/runtime-smoke.md" "$INDEX" \
     && grep -Fq "moooyo/mihomo/blob/${MIHOMO_ACCEPTANCE_COMMIT}/acceptance/runtime-disposable.md" "$INDEX" \

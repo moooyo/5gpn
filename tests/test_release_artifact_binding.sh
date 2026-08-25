@@ -458,7 +458,7 @@ fi
 # The public extension corpus must be parsed by the exact core release the
 # installer pins. Both repositories are immutable inputs to this release gate.
 if grep -Fq 'repository: moooyo/5gpn-extensions' "$CHECKS" \
-   && grep -Fq 'ref: e5c550c46e819a06e078751ee9a245dda07bcbe7' "$CHECKS" \
+   && grep -Fq 'ref: 550760ac6529900f783f6fbcf0a8b5f149619a51' "$CHECKS" \
    && grep -Fq 'mihomo_repo=%s\n' "$CHECKS" \
    && grep -Fq 'mihomo_version=%s\n' "$CHECKS" \
    && grep -Fq 'repository: ${{ steps.release_pins.outputs.mihomo_repo }}' "$CHECKS" \

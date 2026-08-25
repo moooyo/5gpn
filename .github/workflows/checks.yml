@@ -154,7 +154,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           repository: moooyo/5gpn-extensions
-          ref: e5c550c46e819a06e078751ee9a245dda07bcbe7
+          ref: 550760ac6529900f783f6fbcf0a8b5f149619a51
           path: official-extensions
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
@@ -205,13 +205,12 @@ jobs:
             tuning: {}
           }' > "$state/dns.json"
           jq -n '{
-            version: 6,
+            version: 7,
             execution_order: [],
             tls_cert: "/etc/5gpn/intercept/tls/fullchain.pem",
             tls_key: "/etc/5gpn/intercept/tls/privkey.pem",
             mitm: {enabled: false, http2: true, http3: false},
-            modules: [],
-            catalogs: []
+            modules: []
           }' > "$state/intercept.json"
           jq -n '{version: 1, enabled: false, token: "", admins: [], alerts: false}' \
             > "$state/bot.json"

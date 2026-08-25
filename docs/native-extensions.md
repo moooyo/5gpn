@@ -219,11 +219,13 @@ is rejected before publication rather than disabling the extension implicitly.
 ## Operator review contract
 
 The current `5gpn-interception` capability and operator review contract are both
-version 7. This is a control-plane version: the native manifest remains
-`5gpn.io/v1`, the Marketplace remains `5gpn.io/marketplace/v1`, and the current
-persisted `intercept.json` document remains version 6. Installed-extension
+version 8. The native manifest remains
+`5gpn.io/v1` and the Marketplace index remains `5gpn.io/marketplace/v1`, but the
+current persisted `intercept.json` document is version 7: unlike its
+predecessors this revision changes what is stored, because it removed the
+`catalogs` array. Installed-extension
 details and install or Marketplace review candidates carry
-`review_contract: 7`.
+`review_contract: 8`.
 
 Each entry in a detail's `actions` array is a structured, bounded
 `ActionReview`. Common fields state the action ID, phase, host/scheme/method/path
@@ -243,7 +245,7 @@ sequence to show added, removed, changed, and reordered actions. It is a review
 identity, not an apply credential: candidate digest, selected Marketplace URL,
 document revision, and apply-time refetch remain independently required.
 
-The following confirmation-bearing writes require the exact value 7 and are
+The following confirmation-bearing writes require the exact value 8 and are
 rejected with HTTP 400 before persistence when it is missing, stale, or future:
 
 1. fresh URL or local install apply;
@@ -260,11 +262,11 @@ echoing the returned number. A mismatch hides the action cards, leaves confirm
 unavailable, and produces no mutation request. If a stale tab nevertheless
 sends its old constant after a core upgrade, the core rejects it.
 
-Version 7 adds no persisted authorization epoch. A current-schema snapshot that
-was already enabled remains enabled when the new core loads it; the upgrade does
-not synthesize a confirmation or disable extensions. Its next protected
-install, update, reorder, or enable operation uses the v7 gate. After an operator
-disables it without a contract, enabling it again requires the current contract.
+Version 8 moves the persisted document with it, so there is no snapshot to carry
+across the upgrade. A version 6 `intercept.json` is refused at decode — it always
+carried the retired `catalogs` key — rather than migrated or read leniently.
+Extensions installed under the old document are reinstalled and reviewed again
+like any other; the upgrade never synthesizes a confirmation on their behalf.
 
 ## Network permission
 
@@ -667,27 +669,24 @@ manifests use inline scripts or absolute HTTPS script URLs. Both actions install
 the extension disabled and reject an ID that is already installed. Every new
 extension receives the explicit `DIRECT` egress default.
 
-The top-level Console Marketplace page accepts explicit HTTPS marketplace
-indexes using the strict `5gpn.io/marketplace/v1` JSON contract. A marketplace
+The top-level Console Marketplace page reads one index, at a URL compiled into
+the core, using the strict `5gpn.io/marketplace/v1` JSON contract. A marketplace
 is only a bounded discovery list. The engine fetches and caches it through the
 same redirect and post-resolution SSRF guard, while the Console renders only
-the authenticated normalized projection. Adding or refreshing a marketplace
+the authenticated normalized projection. Refreshing the marketplace
 never installs, updates, enables, or executes an extension.
 
-Only a complete successful fetch replaces a source's in-memory listing. A
+Only a complete successful fetch replaces the in-memory listing. A
 network or parse failure, including a duplicate field or partially invalid
 entry, keeps the previous complete listing regardless of cache age and displays
-the source error beside it. A source with no successful snapshot remains empty.
+the fetch error beside it. An index with no successful snapshot remains empty.
 
-Fresh and explicitly reset interception documents contain `catalogs: []`.
-There is no built-in marketplace and no publisher request until an
-authenticated operator adds a reviewed HTTPS index through the Console.
-
-An optional source display name is local operator text only. It does not replace
-the index metadata identity or prove publisher ownership. It never changes the
-remote index, manifest, or script digests. The separate local normalized-source
-snapshot digest includes the display name so a revision-protected write for one
-reviewed label cannot authorize another.
+There is no persisted marketplace configuration and no route that adds, renames,
+removes, or disables a source. A fresh gateway contacts the built-in index the
+first time an operator opens the Marketplace page, and never contacts another
+one. The page labels the index from the index's own `metadata`, which is
+publisher-declared discovery text and proves no more than the rest of the
+listing does.
 
 Selecting a marketplace entry refetches its manifest through this same native
 parser and verifies the index's manifest SHA-256, identity, and derived
@@ -720,20 +719,22 @@ request, in-process traffic policy, engine state, and DNS overlay.
 The monolith Telegram bot is read-only and alert-only. It may report status,
 resolve a name, and send transition alerts to allowlisted administrators. It
 cannot install, update, enable,
-disable, reorder, configure, or remove an extension; it cannot edit catalogs,
+disable, reorder, configure, or remove an extension; it cannot edit
 settings, egress bindings, capture-DNS bindings, or routing rules. All extension
 review and mutation stays on the authenticated Console surface.
 
-Project-maintained examples, including Apple WLOC, live in the separate
+Project-maintained extensions live in the separate
 `moooyo/5gpn-extensions` catalog. The core repository intentionally contains no
-extension source. The official marketplace index is:
+extension source. That repository publishes the one index the core reads:
 
 ```text
 https://moooyo.github.io/5gpn-extensions/marketplace/v2/index.json
 ```
 
-The public repository also exposes Apple WLOC directly at:
+Every extension in it is also reachable directly, which is what **Install from
+URL** takes — the Marketplace is a way to find a manifest, not the only way to
+install one:
 
 ```text
-https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/apple-wloc/extension.yaml
+https://raw.githubusercontent.com/moooyo/5gpn-extensions/main/youtube-cleaner/extension.yaml
 ```

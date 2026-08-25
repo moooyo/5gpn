@@ -409,8 +409,9 @@ Recorded 2026-08-09, updated 2026-08-22.**
 
 **Status: Implemented. Recorded 2026-07-19, extended with operator capture-DNS
 bindings on 2026-07-22, superseded in place by the single-process mihomo
-contract and explicit HTTP/3 refusal on 2026-08-05, and extended with review
-contract 7 on 2026-08-17.**
+contract and explicit HTTP/3 refusal on 2026-08-05, extended with review
+contract 7 on 2026-08-17, and superseded in place by the single built-in
+marketplace and review contract 8 on 2026-08-25.**
 
 - The extension system accepts only strict `5gpn.io/v1` native YAML manifests.
   It does not parse or emulate third-party proxy-client plugin formats.
@@ -429,10 +430,11 @@ contract 7 on 2026-08-17.**
   normalized rules and authorizes them together with the extension; there is no
   second routing-only confirmation. Reordering requires its own review because
   it can change global first-match behavior.
-- `5gpn-interception` capability 7 is also the exact operator review contract;
-  it does not change native manifest v1, Marketplace v1, or persisted
-  `intercept.json` version 6. Every installed detail and install or Marketplace
-  candidate carries `review_contract: 7`. Its action list is a structured,
+- `5gpn-interception` capability 8 is also the exact operator review contract.
+  It leaves native manifest v1 and Marketplace v1 alone, but it does move
+  persisted `intercept.json` to version 7, because it deleted the `catalogs`
+  array. Every installed detail and install or Marketplace
+  candidate carries `review_contract: 8`. Its action list is a structured,
   bounded `ActionReview` projection with matchers, gate, kind, body mode,
   limits, source evidence, declarative parameters, and one deterministic
   `review_digest` per action. Manifest bytes, script or JQ source text, and mock
@@ -441,16 +443,15 @@ contract 7 on 2026-08-17.**
   reordered actions by action ID, digest, and sequence rather than displaying a
   raw action or source dump.
 - Fresh install apply, Marketplace update apply, complete reorder, and enable
-  require `review_contract: 7`; missing, stale, and future values fail with HTTP
+  require `review_contract: 8`; missing, stale, and future values fail with HTTP
   400 before revision or state changes. For disable, a missing, null, or zero
   value is treated as omitted so revocation remains available; nonzero stale
   and future versions are rejected. The
   Console validates returned contracts against its local constant before
   rendering an actionable review and always sends that constant rather than
-  echoing the server value. Existing current-schema enabled snapshots are
-  grandfathered as durable authorization: loading v7 neither disables them nor
-  creates an authorization epoch, while their next protected mutation must use
-  v7 and a later re-enable must be reviewed again.
+  echoing the server value. Nothing is grandfathered across this bump: a
+  version 6 document carries the retired `catalogs` key and is refused at
+  decode rather than migrated.
 - Native scripts define `transform(context)`. They receive structured
   request/response data, typed settings, console logging, optional bounded
   storage, bounded action-scoped timers, and—only when explicitly declared and
@@ -558,17 +559,22 @@ contract 7 on 2026-08-17.**
 - URL install and local add are separate actions. URL install accepts one HTTPS
   manifest and may snapshot relative HTTPS scripts. Local add accepts one
   pasted or uploaded manifest and uses inline or absolute HTTPS scripts.
-- First-party extension source, including Apple WLOC, is maintained in the
+- First-party extension source is maintained in the
   separate `moooyo/5gpn-extensions` repository. The core repository does not
-  vendor, seed, or release extension manifests or scripts. Its target
-  coordinates still use the generic `location` setting and map editor available
-  to any native extension.
+  vendor, seed, or release extension manifests or scripts. Apple WLOC was
+  retired from that catalog on 2026-08-25; the generic `location` setting and
+  its map editor are a manifest capability in their own right and stay.
 - The extensions repository publishes a deterministic
-  `5gpn.io/marketplace/v1` index through GitHub Pages. Operators explicitly add
-  marketplace URLs through the authenticated Console; successful refreshes
+  `5gpn.io/marketplace/v1` index through GitHub Pages. That index is the one
+  marketplace 5gpn reads, and its URL is compiled into the core rather than
+  configured: there is no persisted source list and no way for an operator to
+  add, rename, remove, or disable a marketplace. Successful refreshes
   retain a complete bounded index snapshot and failures preserve the prior
   snapshot.
-  Marketplace data is discovery metadata, never an execution or trust root.
+  Marketplace data is discovery metadata, never an execution or trust root, and
+  being first-party does not exempt it from review — it is fetched over the
+  network through the same guarded client and checked against the manifest like
+  any other listing.
   Selecting an entry refetches one manifest through the native parser, verifies
   the listed manifest digest and derived capability summary, and either stores
   a new disabled immutable snapshot or atomically updates the already installed
@@ -583,12 +589,12 @@ contract 7 on 2026-08-17.**
   route. Installed snapshot configuration and execution remain on
   `/extensions`, with host audit on `/extensions/hosts`; the
   installed-extensions page has no decorative traffic rail or embedded
-  marketplace tab. Optional marketplace display names are local labels and
-  never publisher identity.
+  marketplace tab. The page labels the built-in index from the index's own
+  metadata; there is no operator-supplied display name.
 - The monolith Telegram bot is read-only and alert-only. It may report status,
   resolve a name, and send transition alerts to allowlisted administrators. It
   cannot mutate extension,
-  catalog, policy, or mihomo configuration. Extension installation, review,
+  policy, or mihomo configuration. Extension installation, review,
   enablement, settings, location, egress binding, capture-DNS binding, update,
   and ordering remain exclusively on the authenticated Console surface.
 
