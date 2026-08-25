@@ -4208,6 +4208,7 @@ validate_existing_runtime_documents() {
     local validator="${1:-${ARTIFACT_STAGE}/mihomo}" validator_label="${2:-staged Core}"
     local path present=0 owner_uid="" dns_revision_before="" dns_revision_after=""
     local dns_document="${FIVEGPN_STATE_DIR}/dns.json"
+    local validation_report validation_line
     VALIDATED_DNS_SOURCE_REVISION=""
     for path in "${FIVEGPN_STATE_DIR}/dns.json" "${FIVEGPN_STATE_DIR}/intercept.json" \
                 "${FIVEGPN_STATE_DIR}/bot.json"; do
@@ -4243,10 +4244,28 @@ validate_existing_runtime_documents() {
         [[ -n "$owner_uid" ]] \
             || { err "Existing runtime documents cannot be validated from a group-only identity journal."; return 1; }
     fi
-    timeout --kill-after=5s 30s "$validator" 5gpn-state validate \
+    validation_report="$(mktemp)" \
+        || { err "Could not stage the runtime-document validation report."; return 1; }
+    if ! timeout --kill-after=5s 30s "$validator" 5gpn-state validate \
         --owner-uid "$owner_uid" "$FIVEGPN_STATE_DIR" \
-        >/dev/null \
-        || { err "Existing runtime documents failed validation by the ${validator_label}."; return 1; }
+        > "$validation_report" 2>&1; then
+        err "Existing runtime documents failed validation by the ${validator_label}."
+        # The report names the document. Print it rather than discarding it:
+        # without it this failure reads as "the installer broke", when the
+        # usual cause is a document written by a superseded schema.
+        while IFS= read -r validation_line; do
+            [[ -n "$validation_line" ]] || continue
+            err "  ${validation_line}"
+        done < "$validation_report"
+        err "This is pre-release software and does not migrate runtime documents."
+        err "A document from a superseded schema must be removed so the Core can"
+        err "seed a current one; back it up first, and remove only the document the"
+        err "report names. Do not clear a document that failed for another reason --"
+        err "dns.json in particular carries policy the Core cannot reconstruct."
+        rm -f -- "$validation_report"
+        return 1
+    fi
+    rm -f -- "$validation_report"
     if [[ -n "$dns_revision_before" ]]; then
         [[ -f "$dns_document" && ! -L "$dns_document" ]] \
             || { err "The DNS document changed while the ${validator_label} validated it."; return 1; }
