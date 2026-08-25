@@ -440,4 +440,32 @@ ui_generation_remove_root "$ui_root" || fail "validated generation root could no
 [[ ! -e "$ui_root" && ! -L "$ui_root" ]] || fail "UI generation root remains after safe removal"
 pass "uninstall validates current and per-generation markers before deletion"
 
+# Claiming the root is destructive to unpublished candidates by design: it is
+# the "nothing is staged yet" entry point, so it sweeps every `.candidate-*`.
+# That contract is only safe while nothing claims after staging. install_ui
+# claims, stages the verified Console tree, and hands the candidate to
+# prepare_ios_profile; a second claim there deleted it and left the profile
+# generator a path that no longer existed, so every install that staged a new
+# Console version failed while a same-version reinstall kept working.
+claim_root="$TMP/claim-sweep/ui"
+sweep_dist="$TMP/dist-sweep"
+make_dist "$sweep_dist" S app-ssssssss.js asset-s
+printf '<html>S assets/app-ssssssss.js favicon.ico manifest.webmanifest registerSW.js sw.js</html>\n' \
+    > "$sweep_dist/index.html"
+mkdir -p "$claim_root"
+ui_generation_claim_root "$claim_root" || fail "could not claim a fresh generation root"
+swept="$(ui_generation_stage_tree "$claim_root" "$sweep_dist" v0.0.0-sweep)" \
+    || fail "could not stage a candidate into the claimed root"
+[[ -d "$swept" ]] || fail "staged candidate is missing before the claim contract is exercised"
+ui_generation_claim_root "$claim_root" || fail "re-claiming a staged root failed outright"
+[[ ! -e "$swept" ]] \
+    || fail "claiming the root no longer sweeps unpublished candidates; the guard below is stale"
+pass "claiming the generation root sweeps unpublished candidates"
+
+if awk '/^prepare_ios_profile\(\)/{f=1} f&&/^}/{exit} f' "$ROOT/install.sh" \
+   | grep -q 'claim_ui_dir'; then
+    fail "prepare_ios_profile claims the UI root again and would delete the staged candidate"
+fi
+pass "profile preparation reuses the staged candidate instead of re-claiming the root"
+
 echo "all UI generation tests passed"

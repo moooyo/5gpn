@@ -8003,9 +8003,15 @@ prepare_ios_profile() {
             || { err "Could not clone the validated current UI generation."; return 1; }
         UI_GENERATION_CANDIDATE="$candidate"
         created_candidate=1
-    else
-        claim_ui_dir || return 1
     fi
+    # Deliberately no claim here when a candidate is already held. Claiming the
+    # root sweeps every `.candidate-*` entry, which is correct before anything
+    # is staged and destructive afterwards: install_ui claims the root, stages
+    # the verified Console tree into a candidate, and hands it here. Re-claiming
+    # deleted that candidate and left the generator a path that no longer
+    # existed, so every install that staged a new Console failed here while a
+    # reinstall of the same version -- which takes the clone branch above --
+    # kept working.
     if generator_before="$(installed_runtime_script_state "$generator")"; then
         # The generator writes only the unpublished candidate. The filesystem
         # helper validates the complete Console/profile tree and performs the
