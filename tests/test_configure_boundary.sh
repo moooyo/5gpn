@@ -33,6 +33,12 @@ configure_main_gate_unit_fn="$(sed -n '/^configure_main_unit_restart_gate_is_cur
 configure_helpers_fn="$(sed -n '/^configure_preflight_selected_runtime_helpers()/,/^}/p' "$INSTALL")"
 collect_cf_fn="$(sed -n '/^configure_collect_pending_cf_token()/,/^}/p' "$INSTALL")"
 commit_cf_fn="$(sed -n '/^configure_commit_pending_cf_token()/,/^}/p' "$INSTALL")"
+pending_cf_collect_fn="$(sed -n '/^collect_pending_cf_token()/,/^}/p' "$INSTALL")"
+pending_cf_publish_fn="$(sed -n '/^publish_pending_cf_token()/,/^}/p' "$INSTALL")"
+cf_slot_fn="$(sed -n '/^cf_credential_publication_slot_is_safe()/,/^}/p' "$INSTALL")"
+full_cf_collect_fn="$(sed -n '/^full_install_collect_pending_cf_token()/,/^}/p' "$INSTALL")"
+full_cf_revalidate_fn="$(sed -n '/^full_install_revalidate_pending_cf_token()/,/^}/p' "$INSTALL")"
+full_cf_commit_fn="$(sed -n '/^full_install_commit_pending_cf_token()/,/^}/p' "$INSTALL")"
 prepare_profile_fn="$(sed -n '/^prepare_ios_profile()/,/^}/p' "$INSTALL")"
 publish_profile_fn="$(sed -n '/^publish_ios_profile()/,/^}/p' "$INSTALL")"
 http_certbot_fn="$(sed -n '/^run_http_certbot()/,/^[)]$/p' "$INSTALL")"
@@ -90,20 +96,33 @@ grep -Fq 'configure_installation' <<<"$full_fn" \
     && fail "full install and installed configure were coupled into one pipeline"
 full_confirm_line="$(grep -nF 'resolve_install_configuration 0' <<<"$full_fn" | cut -d: -f1)"
 full_config_line="$(grep -nF 'mihomo_config_matches_install_config' <<<"$full_fn" | cut -d: -f1)"
-full_token_first="$(grep -nF 'ensure_cf_token' <<<"$full_fn" | head -1 | cut -d: -f1)"
-full_token_last="$(grep -nF 'ensure_cf_token' <<<"$full_fn" | tail -1 | cut -d: -f1)"
-full_token_count="$(grep -Fc 'ensure_cf_token' <<<"$full_fn")"
+full_token_collect_line="$(grep -nF 'full_install_collect_pending_cf_token' <<<"$full_fn" | cut -d: -f1)"
+full_token_revalidate_line="$(grep -nF 'full_install_revalidate_pending_cf_token' <<<"$full_fn" | cut -d: -f1)"
 full_publication_line="$(grep -nF 'INSTALL_PUBLICATION_STARTED=1' <<<"$full_fn" | cut -d: -f1)"
+full_claim_line="$(grep -nF 'claim_project_roots' <<<"$full_fn" | tail -1 | cut -d: -f1)"
+full_token_commit_line="$(grep -nF 'full_install_commit_pending_cf_token' <<<"$full_fn" | cut -d: -f1)"
 [[ -n "$full_confirm_line" && -n "$full_config_line" \
-   && -n "$full_token_first" && -n "$full_token_last" \
-   && -n "$full_publication_line" && "$full_token_count" == 2 \
-   && "$full_confirm_line" -lt "$full_token_first" \
-   && "$full_config_line" -lt "$full_token_first" \
-   && "$full_token_first" -le "$full_token_last" \
-   && "$full_token_last" -lt "$full_publication_line" ]] \
-    || fail "full install does not defer Cloudflare credential persistence until confirmation while keeping it pre-publication"
-grep -Fq 'cloudflare_credential_required_for_install "$BASE_DOMAIN"' <<<"$full_fn" \
-    || fail "full install does not distinguish owned/absent Cloudflare state from an external lineage"
+   && -n "$full_token_collect_line" && -n "$full_token_revalidate_line" \
+   && -n "$full_publication_line" && -n "$full_claim_line" \
+   && -n "$full_token_commit_line" \
+   && "$full_confirm_line" -lt "$full_token_collect_line" \
+   && "$full_config_line" -lt "$full_token_collect_line" \
+   && "$full_token_collect_line" -lt "$full_token_revalidate_line" \
+   && "$full_token_revalidate_line" -lt "$full_publication_line" \
+   && "$full_publication_line" -lt "$full_claim_line" \
+   && "$full_claim_line" -lt "$full_token_commit_line" \
+   && ! "$full_fn" =~ ensure_cf_token ]] \
+    || fail "full install does not keep a confirmed Cloudflare token memory-only until project publication"
+grep -Fq 'certificate_selection_state_fingerprint "$BASE_DOMAIN" "$CERT_MODE"' <<<"$full_cf_collect_fn" \
+    && grep -Fq 'collect_pending_cf_token' <<<"$full_cf_collect_fn" \
+    && ! grep -Fq 'write_cf_credential' <<<"$full_cf_collect_fn$full_cf_revalidate_fn" \
+    && grep -Fq 'FULL_INSTALL_CERTIFICATE_SELECTION_STATE' <<<"$full_cf_revalidate_fn" \
+    && grep -Fq 'INSTALL_PUBLICATION_STARTED' <<<"$full_cf_commit_fn" \
+    && grep -Fq 'INSTALL_LOCK_HELD' <<<"$full_cf_commit_fn" \
+    && grep -Fq 'INSTALL_CERT_LOCK_HELD' <<<"$full_cf_commit_fn" \
+    && grep -Fq 'full_install_revalidate_pending_cf_token' <<<"$full_cf_commit_fn" \
+    && grep -Fq 'publish_pending_cf_token' <<<"$full_cf_commit_fn" \
+    || fail "full install does not bind Cloudflare credential publication to its pinned selection and active transaction"
 configure_token_line="$(grep -nF 'configure_collect_pending_cf_token' <<<"$configure_fn" | cut -d: -f1)"
 configure_final_lock_line="$(grep -nF 'acquire_configure_node_lock' <<<"$configure_fn" | tail -1 | cut -d: -f1)"
 configure_final_revalidate_line="$(grep -nF 'configure_revalidate_selected_operator_config' <<<"$configure_fn" | tail -1 | cut -d: -f1)"
@@ -160,11 +179,15 @@ grep -Fq 'CONFIGURE_RUNTIME_GATE_LIVE_UNIT_STATE' <<<"$configure_main_gate_unit_
     && grep -Fq 'CONFIGURE_RUNTIME_UI_VALIDATOR_STATE' <<<"$configure_main_gate_unit_fn" \
     && grep -Fq 'configure_main_unit_restart_gate_is_current' <<<"$configure_validate_runtime_fn" \
     || fail "gate unit/helper generation is not pinned across publication and release"
-grep -Fq 'PENDING_CF_TOKEN="$tok"' <<<"$collect_cf_fn" \
-    && ! grep -Fq 'write_cf_credential' <<<"$collect_cf_fn" \
+grep -Fq 'collect_pending_cf_token' <<<"$collect_cf_fn" \
+    && grep -Fq 'PENDING_CF_TOKEN="$tok"' <<<"$pending_cf_collect_fn" \
+    && ! grep -Fq 'write_cf_credential' <<<"$pending_cf_collect_fn" \
+    && ! grep -Eq 'ensure_acme_dir|install[[:space:]]+-d|mkdir|mv[[:space:]]' <<<"$pending_cf_collect_fn$cf_slot_fn" \
     && grep -Fq 'CONFIGURE_NODE_LOCK_HELD' <<<"$commit_cf_fn" \
     && grep -Fq 'INSTALL_CERT_LOCK_HELD' <<<"$commit_cf_fn" \
     && grep -Fq 'configure_assert_certificate_selection' <<<"$commit_cf_fn" \
+    && grep -Fq 'publish_pending_cf_token' <<<"$commit_cf_fn" \
+    && grep -Fq 'write_cf_credential "$PENDING_CF_TOKEN"' <<<"$pending_cf_publish_fn" \
     && grep -Fq 'verify_console_dns' <<<"$configure_locked_revalidate_fn" \
     || fail "configure does not defer Cloudflare credential persistence until both locks and final revalidation"
 grep -Fq 'prepare_ios_profile' <<<"$configure_cert_fn" \
@@ -215,6 +238,94 @@ pass "configure is an installed-only locked transaction with no reinstall or rel
     true
 )
 pass "Cloudflare credentials are confirmed pre-publication only for owned or absent lineage state"
+
+# Full installation must not turn a confirmed in-memory token into a live file
+# until both locks are held, the certificate selection still matches, and the
+# explicit project publication boundary has actually started.
+(
+    BASE_DOMAIN=example.test
+    CERT_MODE=cloudflare
+    INSTALL_LOCK_HELD=1
+    INSTALL_CERT_LOCK_HELD=1
+    INSTALL_PUBLICATION_STARTED=0
+    FULL_INSTALL_CERTIFICATE_SELECTION_STATE=stable-selection
+    PENDING_CF_TOKEN=confirmed-secret
+    TEST_CF_SAVED=0
+    token_writes="$TMP/full-install-token-writes"
+    : > "$token_writes"
+    err() { :; }
+    ok() { :; }
+    certificate_selection_state_is_consistent_for_install() { return 0; }
+    certificate_selection_state_fingerprint() { printf '%s\n' stable-selection; }
+    cloudflare_credential_required_for_install() { return 0; }
+    cf_credential_publication_slot_is_safe() { return 0; }
+    has_valid_cf_credential() { [[ "$TEST_CF_SAVED" == 1 ]]; }
+    write_cf_credential() {
+        printf '%s\n' "$1" >> "$token_writes"
+        TEST_CF_SAVED=1
+    }
+
+    full_install_commit_pending_cf_token >/dev/null 2>&1 \
+        && fail "full install published the pending Cloudflare credential before publication"
+    [[ ! -s "$token_writes" && "$PENDING_CF_TOKEN" == confirmed-secret ]] \
+        || fail "pre-publication Cloudflare rejection wrote or discarded the confirmed candidate"
+
+    INSTALL_PUBLICATION_STARTED=1
+    full_install_commit_pending_cf_token \
+        || fail "full install did not publish the confirmed credential inside the active boundary"
+    [[ "$(cat "$token_writes")" == confirmed-secret \
+       && -z "$PENDING_CF_TOKEN" && "$TEST_CF_SAVED" == 1 ]] \
+        || fail "full-install Cloudflare publication did not atomically consume and verify the pending token"
+)
+pass "full-install Cloudflare persistence begins only inside the locked publication boundary"
+
+(
+    BASE_DOMAIN=example.test
+    CERT_MODE=cloudflare
+    INSTALL_LOCK_HELD=1
+    INSTALL_CERT_LOCK_HELD=1
+    INSTALL_PUBLICATION_STARTED=1
+    FULL_INSTALL_CERTIFICATE_SELECTION_STATE=stable-selection
+    PENDING_CF_TOKEN=confirmed-secret
+    token_writes="$TMP/full-install-drift-writes"
+    : > "$token_writes"
+    err() { :; }
+    certificate_selection_state_is_consistent_for_install() { return 0; }
+    certificate_selection_state_fingerprint() { printf '%s\n' drifted-selection; }
+    cloudflare_credential_required_for_install() { return 0; }
+    cf_credential_publication_slot_is_safe() { return 0; }
+    has_valid_cf_credential() { return 1; }
+    write_cf_credential() { printf '%s\n' "$1" >> "$token_writes"; }
+
+    full_install_commit_pending_cf_token >/dev/null 2>&1 \
+        && fail "full install published a token after certificate-selection drift"
+    [[ ! -s "$token_writes" && "$PENDING_CF_TOKEN" == confirmed-secret ]] \
+        || fail "certificate-selection drift wrote or discarded the pending token"
+)
+pass "full-install Cloudflare persistence rejects certificate-selection drift"
+
+(
+    BASE_DOMAIN=example.test
+    CERT_MODE=cloudflare
+    INSTALL_LOCK_HELD=1
+    INSTALL_CERT_LOCK_HELD=1
+    INSTALL_PUBLICATION_STARTED=1
+    FULL_INSTALL_CERTIFICATE_SELECTION_STATE=stable-selection
+    PENDING_CF_TOKEN=unused-confirmed-secret
+    err() { :; }
+    certificate_selection_state_is_consistent_for_install() { return 0; }
+    certificate_selection_state_fingerprint() { printf '%s\n' stable-selection; }
+    cloudflare_credential_required_for_install() { return 0; }
+    cf_credential_publication_slot_is_safe() { return 0; }
+    has_valid_cf_credential() { return 0; }
+    write_cf_credential() { fail "full install rewrote an existing valid Cloudflare credential"; }
+
+    full_install_commit_pending_cf_token \
+        || fail "full install rejected a valid saved Cloudflare credential"
+    [[ -z "$PENDING_CF_TOKEN" ]] \
+        || fail "full install retained an unused in-memory token after reusing the saved credential"
+)
+pass "full installation reuses an existing valid Cloudflare credential without writing it"
 
 (
     unset -f configure_revalidate_selected_operator_config

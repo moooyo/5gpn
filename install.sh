@@ -372,6 +372,7 @@ LOADED_DNS_ENV_SOURCE_IDENTITY=""
 # renewal sets this flag only after its scoped timer is active.
 KEEP_GLOBAL_CERTBOT_TIMER_DISABLED=0
 DECOMMISSION_PRESERVE_ACME=0
+CERT_PROVENANCE_COMMIT_STATE=""
 # Stable root for the zashboard/profile generation tree. The service sandbox
 # grants this root, while the operator config names only its atomic `current`
 # symlink. A dns.env key that could move either path would move it out from
@@ -1000,6 +1001,19 @@ persist_replaced_fivegpn_identity() {
 
 complete_replaced_fivegpn_identity_reconciliation() {
     [[ "$IDENTITY_RECONCILE_LOADED" == 1 ]] || load_identity_reconcile_journal || return 1
+    if [[ ! -e "$IDENTITY_RECONCILE_FILE" && ! -L "$IDENTITY_RECONCILE_FILE" ]]; then
+        [[ -z "$REPLACED_FIVEGPN_UID" && -z "$REPLACED_FIVEGPN_GID" \
+           && -z "$REPLACED_FIVEGPN_NAMED_GID" ]] \
+            || { err "The loaded identity reconciliation journal disappeared before completion."; return 1; }
+        return 0
+    fi
+    identity_reconcile_journal_file_is_safe \
+        || { err "Refusing to complete an unsafe identity reconciliation journal."; return 1; }
+    [[ -n "$REPLACED_FIVEGPN_UID" || -n "$REPLACED_FIVEGPN_GID" \
+       || -n "$REPLACED_FIVEGPN_NAMED_GID" ]] \
+        || { err "Refusing to remove an identity reconciliation journal with no loaded identity."; return 1; }
+    sync_reconciled_managed_root_filesystems || return 1
+    assert_replaced_fivegpn_identity_reconciled || return 1
     publish_identity_reconcile_journal - - -
 }
 
@@ -2300,40 +2314,8 @@ systemd_unit_specific_dropin_names() {
     done
 }
 
-systemd_global_dropin_key_is_managed() {
-    local type="$1" key="$2"
-    case "$type" in
-        service)
-            case "$key" in
-                Exec*|User|Group|SupplementaryGroups|DynamicUser|Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment|\
-                WorkingDirectory|RootDirectory|RootDirectoryStartOnly|RootImage|RootEphemeral|UMask|PermissionsStartOnly|\
-                Restart*|Kill*|TimeoutStartSec|SuccessExitStatus|OOMPolicy|Delegate*|Slice|DisableControllers|\
-                Memory*|StartupMemory*|AllowedMemoryNodes|StartupAllowedMemoryNodes|\
-                CPU*|StartupCPU*|AllowedCPUs|StartupAllowedCPUs|\
-                IO*|StartupIO*|BlockIO*|StartupBlockIO*|Tasks*|ManagedOOM*|\
-                Limit*|Nice|OOMScoreAdjust|TimerSlackNSec|NUMA*|\
-                Protect*|Private*|Restrict*|ReadWritePaths|ReadOnlyPaths|InaccessiblePaths|BindPaths|BindReadOnlyPaths|\
-                TemporaryFileSystem|MountImages|ExtensionImages|NoExecPaths|ExecPaths|CapabilityBoundingSet|AmbientCapabilities|\
-                NoNewPrivileges|SystemCall*|LockPersonality|MemoryDenyWriteExecute|SecureBits|KeyringMode|ProtectProc|ProcSubset|\
-                IPAddressAllow|IPAddressDeny|SocketBindAllow|SocketBindDeny|NetworkNamespacePath|JoinsNamespaceOf|Device*|\
-                LoadCredential*|SetCredential*|ImportCredential*|StateDirectory*|CacheDirectory*|LogsDirectory*|\
-                ConfigurationDirectory*|RuntimeDirectory*|Type|PIDFile|BusName)
-                    return 0 ;;
-            esac ;;
-        path)
-            case "$key" in PathExists|PathExistsGlob|PathChanged|PathModified|DirectoryNotEmpty|Unit|MakeDirectory)
-                return 0 ;;
-            esac ;;
-        timer)
-            case "$key" in OnActiveSec|OnBootSec|OnStartupSec|OnUnitActiveSec|OnUnitInactiveSec|OnCalendar|Unit|Persistent|RandomizedDelaySec)
-                return 0 ;;
-            esac ;;
-    esac
-    return 1
-}
-
 systemd_global_dropin_has_managed_override() {
-    local dir="$1" type="$2" conf line section key
+    local dir="$1" type="$2" conf line section
     local -a files=()
     [[ -e "$dir" || -L "$dir" ]] || return 1
     [[ -d "$dir" && ! -L "$dir" ]] || return 0
@@ -2358,19 +2340,17 @@ systemd_global_dropin_has_managed_override() {
                 section="$line"
                 continue
             fi
+            # Type-wide drop-ins are inherited by every matching unit. Reject
+            # every assignment in an applicable section instead of maintaining
+            # a directive denylist that becomes incomplete as systemd evolves.
+            # Blank/comment-only files and sections for other unit types have
+            # no effective assignment for this unit and remain compatible.
             case "$type:$section" in
-                service:'[Service]'|path:'[Path]'|timer:'[Timer]') ;;
-                service:'[Unit]'|service:'[Install]'|\
-                path:'[Unit]'|path:'[Install]'|\
-                timer:'[Unit]'|timer:'[Install]')
-                    [[ "$line" == *=* ]] && return 0
-                    continue ;;
-                *) continue ;;
+                service:'[Service]'|service:'[Unit]'|service:'[Install]'|\
+                path:'[Path]'|path:'[Unit]'|path:'[Install]'|\
+                timer:'[Timer]'|timer:'[Unit]'|timer:'[Install]')
+                    [[ "$line" == *=* ]] && return 0 ;;
             esac
-            [[ "$line" == *=* ]] || continue
-            key="${line%%=*}"
-            key="${key//[[:space:]]/}"
-            systemd_global_dropin_key_is_managed "$type" "$key" && return 0
         done < "$conf"
     done
     return 1
@@ -3666,6 +3646,46 @@ managed_roots_have_no_nested_mounts() {
     done
 }
 
+identity_reconcile_managed_root_is_safe() {
+    local root="$1"
+    case "$root" in
+        "$BASE_DIR")
+            fixed_owned_dir_is_safe "$root" "$BASE_OWNERSHIP_MARKER" "$BASE_OWNERSHIP_VALUE" ;;
+        "$CONF_DIR")
+            fixed_owned_dir_is_safe "$root" "$CONF_OWNERSHIP_MARKER" "$CONF_OWNERSHIP_VALUE" ;;
+        "$STATE_DIR")
+            fixed_owned_dir_is_safe "$root" "$STATE_OWNERSHIP_MARKER" "$STATE_OWNERSHIP_VALUE" ;;
+        "$INTERCEPT_STATE_DIR")
+            fixed_owned_dir_is_safe "$root" "$INTERCEPT_STATE_MARKER" "$INTERCEPT_STATE_MARKER_VALUE" ;;
+        "$INTERCEPT_CA_DIR")
+            fixed_owned_dir_is_safe "$root" "$INTERCEPT_CA_MARKER" "$INTERCEPT_CA_MARKER_VALUE" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Ownership changes can span several filesystems. Flush each one before the
+# durable recovery journal is removed, choosing one verified root per st_dev.
+sync_reconciled_managed_root_filesystems() {
+    local root device
+    local -A synced_devices=()
+    managed_roots_have_no_nested_mounts || return 1
+    for root in "$BASE_DIR" "$CONF_DIR" "$STATE_DIR" "$INTERCEPT_STATE_DIR" "$INTERCEPT_CA_DIR"; do
+        if [[ ! -e "$root" && ! -L "$root" ]]; then
+            continue
+        fi
+        identity_reconcile_managed_root_is_safe "$root" \
+            || { err "Managed root is unsafe before completing identity reconciliation: $root"; return 1; }
+        device="$(stat -Lc '%d' -- "$root" 2>/dev/null)" \
+            || { err "Could not read the managed-root device before completing identity reconciliation: $root"; return 1; }
+        [[ "$device" =~ ^[0-9]+$ ]] \
+            || { err "Managed root returned an invalid device before completing identity reconciliation: $root"; return 1; }
+        [[ -z "${synced_devices[$device]+present}" ]] || continue
+        sync -f "$root" 2>/dev/null \
+            || { err "Could not durably flush managed ownership changes: $root"; return 1; }
+        synced_devices["$device"]=1
+    done
+}
+
 remove_decommissioned_fivegpn_identity() {
     local uid="" primary_gid="" named_gid="" root residual id_value
     if getent passwd "$FIVEGPN_SERVICE_USER" >/dev/null 2>&1; then
@@ -3820,7 +3840,11 @@ assert_replaced_fivegpn_identity_reconciled() {
     current_gid="$(id -g "$FIVEGPN_SERVICE_USER")"
     managed_roots_have_no_nested_mounts || return 1
     for root in "$BASE_DIR" "$CONF_DIR" "$STATE_DIR" "$INTERCEPT_STATE_DIR" "$INTERCEPT_CA_DIR"; do
-        [[ -d "$root" && ! -L "$root" ]] || continue
+        if [[ ! -e "$root" && ! -L "$root" ]]; then
+            continue
+        fi
+        identity_reconcile_managed_root_is_safe "$root" \
+            || { err "Refusing an unsafe managed root during identity reconciliation scan: $root"; return 1; }
         residual=""
         if [[ -n "$REPLACED_FIVEGPN_UID" && "$REPLACED_FIVEGPN_UID" != "$current_uid" ]]; then
             if ! residual="$(find "$root" -uid "$REPLACED_FIVEGPN_UID" -print -quit 2>/dev/null)"; then
@@ -4806,6 +4830,41 @@ validate_intercept_ca() {
     validate_intercept_ca_pair "$INTERCEPT_CA_DIR/root.crt" "$INTERCEPT_CA_DIR/root.key"
 }
 
+sync_intercept_ca_file() {
+    local path="$1"
+    sync -f "$path" 2>/dev/null \
+        || { err "Could not durably sync interception CA file: $path"; return 1; }
+}
+
+sync_intercept_ca_directory() {
+    sync -f "$INTERCEPT_CA_DIR" 2>/dev/null \
+        || { err "Could not durably sync interception CA directory: $INTERCEPT_CA_DIR"; return 1; }
+}
+
+commit_intercept_ca_publication() {
+    local cert_source="$1" key_source="$2"
+    local live_cert="$INTERCEPT_CA_DIR/root.crt" live_key="$INTERCEPT_CA_DIR/root.key"
+    local new_cert="$INTERCEPT_CA_DIR/.root.crt.new" new_key="$INTERCEPT_CA_DIR/.root.key.new"
+    validate_intercept_ca_pair "$cert_source" "$key_source" \
+        || { err "Interception CA candidate pair is invalid; refusing publication."; return 1; }
+
+    # Make both files and their candidate names durable before either name can
+    # enter the live namespace. A crash between the two renames therefore
+    # leaves either a complete candidate pair or a matching live/candidate pair.
+    sync_intercept_ca_file "$key_source" || return 1
+    sync_intercept_ca_file "$cert_source" || return 1
+    sync_intercept_ca_directory || return 1
+
+    # Publish the private key first so root.crt is never intentionally exposed
+    # without the key needed to continue issuing from that exact trust root.
+    [[ "$key_source" == "$live_key" ]] || mv -Tf -- "$key_source" "$live_key" || return 1
+    [[ "$cert_source" == "$live_cert" ]] || mv -Tf -- "$cert_source" "$live_cert" || return 1
+    rm -f -- "$new_cert" "$new_key" || return 1
+    sync_intercept_ca_directory || return 1
+    validate_intercept_ca \
+        || { err "Published interception CA failed validation."; return 1; }
+}
+
 recover_intercept_ca_publication() {
     local live_cert="$INTERCEPT_CA_DIR/root.crt" live_key="$INTERCEPT_CA_DIR/root.key"
     local new_cert="$INTERCEPT_CA_DIR/.root.crt.new" new_key="$INTERCEPT_CA_DIR/.root.key.new"
@@ -4823,19 +4882,19 @@ recover_intercept_ca_publication() {
     if [[ -e "$live_cert" && -e "$live_key" ]]; then
         validate_intercept_ca \
             || { err "Existing complete interception CA is invalid; refusing replacement."; return 1; }
-        rm -f -- "$new_cert" "$new_key"
-        return 0
+        sync_intercept_ca_file "$live_key" || return 1
+        sync_intercept_ca_file "$live_cert" || return 1
+        rm -f -- "$new_cert" "$new_key" || return 1
+        sync_intercept_ca_directory || return 1
+        validate_intercept_ca
+        return
     fi
     [[ -e "$live_cert" ]] && cert_source="$live_cert" || { [[ -e "$new_cert" ]] && cert_source="$new_cert"; }
     [[ -e "$live_key" ]] && key_source="$live_key" || { [[ -e "$new_key" ]] && key_source="$new_key"; }
     if [[ -n "$cert_source" && -n "$key_source" ]] \
        && validate_intercept_ca_pair "$cert_source" "$key_source"; then
-        [[ "$cert_source" == "$live_cert" ]] || mv -Tf -- "$cert_source" "$live_cert" || return 1
-        [[ "$key_source" == "$live_key" ]] || mv -Tf -- "$key_source" "$live_key" || return 1
-        rm -f -- "$new_cert" "$new_key"
-        sync -f "$INTERCEPT_CA_DIR" 2>/dev/null || true
-        validate_intercept_ca || return 1
-        return 0
+        commit_intercept_ca_publication "$cert_source" "$key_source"
+        return
     fi
     if [[ -e "$live_cert" || -e "$live_key" ]]; then
         err "An incomplete live interception CA cannot be proven to be an unpublished candidate; refusing trust-root replacement."
@@ -4843,8 +4902,8 @@ recover_intercept_ca_publication() {
     fi
     # No complete CA pair was ever published, so exact safe partials can be
     # discarded and regenerated without changing an enrolled trust root.
-    rm -f -- "$live_cert" "$live_key" "$new_cert" "$new_key"
-    sync -f "$INTERCEPT_CA_DIR" 2>/dev/null || true
+    rm -f -- "$new_cert" "$new_key" || return 1
+    sync_intercept_ca_directory
 }
 
 preflight_intercept_ca_publication() {
@@ -4954,10 +5013,9 @@ ensure_intercept_certificates() {
         install -m 0600 "$stage/root.key" "$INTERCEPT_CA_DIR/.root.key.new" \
             && install -m 0644 "$stage/root.crt" "$INTERCEPT_CA_DIR/.root.crt.new" \
             || { rm -f -- "$INTERCEPT_CA_DIR/.root.key.new" "$INTERCEPT_CA_DIR/.root.crt.new"; remove_temp_dir "$stage"; return 1; }
-        mv -f -- "$INTERCEPT_CA_DIR/.root.key.new" "$INTERCEPT_CA_DIR/root.key"
-        mv -f -- "$INTERCEPT_CA_DIR/.root.crt.new" "$INTERCEPT_CA_DIR/root.crt"
-        validate_intercept_ca \
-            || { remove_temp_dir "$stage"; err "Generated interception CA failed validation."; return 1; }
+        commit_intercept_ca_publication \
+            "$INTERCEPT_CA_DIR/.root.crt.new" "$INTERCEPT_CA_DIR/.root.key.new" \
+            || { remove_temp_dir "$stage"; err "Could not durably publish the generated interception CA."; return 1; }
     fi
 
     prepare_intercept_runtime_dirs || { remove_temp_dir "$stage"; return 1; }
@@ -6530,6 +6588,17 @@ certbot_ownership_record_is_safe() {
     [[ "$count" -ge 1 && "$count" -le 16 ]]
 }
 
+certbot_ownership_record_state() {
+    local metadata digest
+    certbot_ownership_record_is_safe || return 1
+    metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' \
+        -- "$CERTBOT_OWNERSHIP_FILE" 2>/dev/null)" || return 1
+    digest="$(sha256sum -- "$CERTBOT_OWNERSHIP_FILE" 2>/dev/null | awk '{print $1}')" \
+        || return 1
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s:%s\n' "$metadata" "$digest"
+}
+
 certbot_ownership_record_has() {
     local base="$1"
     certbot_ownership_record_is_safe \
@@ -6791,11 +6860,39 @@ certbot_transaction_requires_global_timer_pause() {
 }
 
 # The distro timer invokes an unscoped `certbot renew`. It can be disabled only
-# when every visible Certbot lineage belongs to this exact 5gpn base; otherwise
-# disabling it would silently break renewal for unrelated services.
+# when every visible canonical lineage is either the selected candidate or an
+# exact base retained in 5gpn's durable ownership record. Older owned lineages
+# remain dormant: the scoped timer derives only the current base from dns.env.
+# Any external, duplicate-suffix, malformed, or unknown entry keeps the distro
+# timer under its existing owner.
 certbot_lineage_set_is_exclusive() {
-    local base="$1" root entry name expected listing
+    local base="$1" root entry name lineage listing allowed_base matched
+    local ownership_before="" ownership_after="" line previous="" index
     local -a roots=("$LE_LIVE_ROOT" "$LE_ARCHIVE_ROOT" "$LE_RENEWAL_ROOT")
+    local -a allowed_bases=("$base") ownership_lines=()
+    is_valid_domain "$base" || return 1
+    if [[ -e "$CERTBOT_OWNERSHIP_FILE" || -L "$CERTBOT_OWNERSHIP_FILE" ]]; then
+        certbot_ownership_record_is_safe \
+            || { err "The retained Certbot ownership record is unsafe during timer takeover."; return 1; }
+        ownership_before="$(certbot_ownership_record_state)" \
+            || { err "Could not snapshot the Certbot ownership record during timer takeover."; return 1; }
+        mapfile -t ownership_lines < "$CERTBOT_OWNERSHIP_FILE" || return 1
+        [[ "${#ownership_lines[@]}" -ge 2 && "${#ownership_lines[@]}" -le 17 \
+           && "${ownership_lines[0]}" == version=1 ]] || return 1
+        for ((index = 1; index < ${#ownership_lines[@]}; index++)); do
+            line="${ownership_lines[$index]}"
+            [[ "$line" == owned=* ]] || return 1
+            allowed_base="${line#owned=}"
+            is_valid_domain "$allowed_base" || return 1
+            [[ -z "$previous" || "$previous" < "$allowed_base" ]] || return 1
+            previous="$allowed_base"
+            allowed_bases+=("$allowed_base")
+        done
+        ownership_after="$(certbot_ownership_record_state)" \
+            || { err "Could not recheck the Certbot ownership record during timer takeover."; return 1; }
+        [[ "$ownership_after" == "$ownership_before" ]] \
+            || { err "The Certbot ownership record changed during timer takeover."; return 1; }
+    fi
     for root in "${roots[@]}"; do
         [[ ! -e "$root" && ! -L "$root" ]] && continue
         [[ -d "$root" && ! -L "$root" \
@@ -6811,13 +6908,29 @@ certbot_lineage_set_is_exclusive() {
         while IFS= read -r -d '' entry; do
             name="$(basename -- "$entry")"
             if [[ "$root" == "$LE_RENEWAL_ROOT" ]]; then
-                expected="${base}.conf"
+                if [[ "$name" == *.conf && "$name" != .conf \
+                   && -f "$entry" && ! -L "$entry" ]]; then
+                    lineage="${name%.conf}"
+                else
+                    lineage=""
+                fi
             else
-                expected="$base"
                 [[ "$name" == README && -f "$entry" && ! -L "$entry" ]] && continue
+                if [[ -d "$entry" && ! -L "$entry" ]]; then
+                    lineage="$name"
+                else
+                    lineage=""
+                fi
             fi
-            if [[ "$name" != "$expected" ]]; then
-                err "Unrelated Certbot lineage state prevents disabling the distro certbot.timer: $entry"
+            matched=0
+            for allowed_base in "${allowed_bases[@]}"; do
+                if [[ "$lineage" == "$allowed_base" ]]; then
+                    matched=1
+                    break
+                fi
+            done
+            if [[ "$matched" != 1 ]]; then
+                err "Unrelated or non-canonical Certbot lineage state prevents disabling the distro certbot.timer: $entry"
                 err "Configure independent locked renewal for every lineage before installing an owned 5gpn lineage."
                 rm -f -- "$listing"
                 return 1
@@ -6825,6 +6938,12 @@ certbot_lineage_set_is_exclusive() {
         done < "$listing"
         rm -f -- "$listing" || return 1
     done
+    if [[ -n "$ownership_before" ]]; then
+        ownership_after="$(certbot_ownership_record_state)" \
+            || { err "Could not recheck the Certbot ownership record after lineage enumeration."; return 1; }
+        [[ "$ownership_after" == "$ownership_before" ]] \
+            || { err "The Certbot ownership record changed during lineage enumeration."; return 1; }
+    fi
 }
 
 disable_global_certbot_timer_for_owned_lineage() {
@@ -6951,6 +7070,7 @@ decommission_lineage_safe() {
 
 write_cert_provenance() {
     local mode="$1" base="$2" lineage="${3:-none}" tmp
+    CERT_PROVENANCE_COMMIT_STATE=not-committed
     case "$mode:$lineage" in
         debug:none|cloudflare:owned|cloudflare:reused|cloudflare:missing|http-01:owned|http-01:reused|http-01:missing) ;;
         *) err "Invalid certificate provenance state: ${mode}:${lineage}"; return 1 ;;
@@ -6958,11 +7078,17 @@ write_cert_provenance() {
     ensure_dns_cert_root || return 1
     [[ "$lineage" != owned ]] || persist_certbot_lineage_ownership "$base" || return 1
     tmp="$(mktemp "${DNS_CERT_DIR}/.provenance.XXXXXX")" || return 1
-    printf 'mode=%s\nbase=%s\ncertbot_lineage=%s\n' "$mode" "$base" "$lineage" > "$tmp"
-    chmod 0640 "$tmp"
-    sync -f "$tmp" 2>/dev/null || true
-    mv -f -- "$tmp" "$DNS_CERT_DIR/.provenance"
-    sync -f "$DNS_CERT_DIR" 2>/dev/null || true
+    printf 'mode=%s\nbase=%s\ncertbot_lineage=%s\n' "$mode" "$base" "$lineage" > "$tmp" \
+        && chmod 0640 "$tmp" \
+        || { rm -f -- "$tmp"; err "Could not prepare the certificate provenance candidate."; return 1; }
+    sync -f "$tmp" 2>/dev/null \
+        || { rm -f -- "$tmp"; err "Could not durably write the certificate provenance candidate."; return 1; }
+    mv -f -- "$tmp" "$DNS_CERT_DIR/.provenance" \
+        || { rm -f -- "$tmp"; err "Could not publish the certificate provenance record."; return 1; }
+    CERT_PROVENANCE_COMMIT_STATE=committed-undurable
+    sync -f "$DNS_CERT_DIR" 2>/dev/null \
+        || { err "Certificate provenance became visible, but its durability was not confirmed."; return 1; }
+    CERT_PROVENANCE_COMMIT_STATE=committed
     cert_root_is_safe \
         || { err "Certificate provenance publication broke the root boundary."; return 1; }
 }
@@ -7504,6 +7630,22 @@ cf_credential_file_safe() {
        && "$(file_mode "$f")" == 600 ]]
 }
 
+# Inspect the Cloudflare credential slot without creating either the directory
+# or the file. Full installation uses this before its publication boundary so
+# a known-unsafe live path fails while the host is still otherwise untouched.
+cf_credential_publication_slot_is_safe() {
+    local f="${ACME_DIR}/cloudflare.ini"
+    if [[ ! -e "$ACME_DIR" && ! -L "$ACME_DIR" ]]; then
+        return 0
+    fi
+    acme_dir_safe \
+        || { err "ACME credentials directory must be canonical, root-owned, non-symlink, and mode 0700: ${ACME_DIR}"; return 1; }
+    if [[ -e "$f" || -L "$f" ]]; then
+        cf_credential_file_safe \
+            || { err "Refusing unsafe existing Cloudflare credential path: ${f}"; return 1; }
+    fi
+}
+
 # has_valid_cf_credential returns 0 (true) when ${ACME_DIR}/cloudflare.ini
 # exists and contains a non-empty dns_cloudflare_api_token value.
 # Used by ensure_cf_token to decide whether to prompt or reuse.
@@ -7535,6 +7677,50 @@ write_cf_credential() {
     printf 'dns_cloudflare_api_token = %s\n' "$tok" > "$tmp" || { rm -f -- "$tmp"; return 1; }
     chmod 0600 "$tmp"                                         || { rm -f -- "$tmp"; return 1; }
     mv -f -- "$tmp" "${ACME_DIR}/cloudflare.ini"              || { rm -f -- "$tmp"; return 1; }
+}
+
+# Collect a missing credential into the caller's dynamically scoped
+# PENDING_CF_TOKEN. This function is deliberately read-only: the confirmed
+# secret is not persisted until the owning transaction reaches its own locked
+# publication boundary.
+collect_pending_cf_token() {
+    PENDING_CF_TOKEN=""
+    cf_credential_publication_slot_is_safe || return 1
+    if has_valid_cf_credential; then
+        info "Reusing saved Cloudflare API token (${ACME_DIR}/cloudflare.ini)."
+        return 0
+    fi
+    local tok=""
+    [[ -t 0 ]] \
+        && tok="$(ask_secret 'Cloudflare API token (Zone:DNS:Edit scope for your base zone):' || true)"
+    if [[ -z "$tok" || ! "$tok" =~ [^[:space:]] ]]; then
+        err "No Cloudflare API token. Run the attached-terminal TUI; shell environment tokens are not accepted."
+        return 1
+    fi
+    if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
+        err "Cloudflare API token must not contain CR or LF (check for a trailing newline)."
+        return 1
+    fi
+    PENDING_CF_TOKEN="$tok"
+    info "Cloudflare API token retained only in memory until the locked publication boundary."
+}
+
+# Publish a previously confirmed in-memory candidate. Transaction-specific
+# wrappers must establish and revalidate their locks and mutation boundary
+# before calling this helper.
+publish_pending_cf_token() {
+    cf_credential_publication_slot_is_safe || return 1
+    if has_valid_cf_credential; then
+        PENDING_CF_TOKEN=""
+        return 0
+    fi
+    [[ -n "${PENDING_CF_TOKEN:-}" ]] \
+        || { err "The confirmed Cloudflare credential candidate is no longer available."; return 1; }
+    write_cf_credential "$PENDING_CF_TOKEN" || return 1
+    PENDING_CF_TOKEN=""
+    has_valid_cf_credential \
+        || { err "The locked Cloudflare credential publication could not be verified."; return 1; }
+    ok "Cloudflare API token saved after the locked publication recheck."
 }
 
 # ensure_cf_token guarantees a valid Cloudflare API token exists in
@@ -9260,23 +9446,30 @@ configure_plan_changes() {
     CONFIGURE_ANY_CHANGE="$CONFIGURE_DNS_ENV_CHANGED"
 }
 
-configure_certificate_selection_state() {
+certificate_selection_state_fingerprint() {
+    local base="$1" mode="$2"
     local artifacts=0 owned=0 preserved=0 credential_required=0
-    certbot_lineage_artifacts_exist "$BASE_DOMAIN" && artifacts=1
-    certbot_lineage_owned_by_5gpn "$BASE_DOMAIN" && owned=1
-    if [[ "$artifacts" == 0 && "$CERT_MODE" != debug ]] \
-       && cert_provenance_matches "$CERT_MODE" "$BASE_DOMAIN" \
+    [[ "$base" == "$BASE_DOMAIN" && "$mode" == "$CERT_MODE" ]] \
+        || { err "Certificate selection fingerprint does not match the active install candidate."; return 1; }
+    certbot_lineage_artifacts_exist "$base" && artifacts=1
+    certbot_lineage_owned_by_5gpn "$base" && owned=1
+    if [[ "$artifacts" == 0 && "$mode" != debug ]] \
+       && cert_provenance_matches "$mode" "$base" \
        && validate_cert_pair \
-            "${DOT_CERT_DIR}/current/fullchain.pem" \
-            "${DOT_CERT_DIR}/current/privkey.pem" \
-            "$BASE_DOMAIN" "$((30*86400))" production "$CERT_MODE"; then
+             "${DOT_CERT_DIR}/current/fullchain.pem" \
+             "${DOT_CERT_DIR}/current/privkey.pem" \
+             "$base" "$((30*86400))" production "$mode"; then
         preserved=1
     fi
-    cloudflare_credential_required_for_install "$BASE_DOMAIN" \
+    cloudflare_credential_required_for_install "$base" \
         && credential_required=1
     printf '%s|%s|%s|%s|%s|%s\n' \
-        "$CERT_MODE" "$BASE_DOMAIN" "$artifacts" "$owned" \
+        "$mode" "$base" "$artifacts" "$owned" \
         "$preserved" "$credential_required"
+}
+
+configure_certificate_selection_state() {
+    certificate_selection_state_fingerprint "$BASE_DOMAIN" "$CERT_MODE"
 }
 
 configure_capture_certificate_selection() {
@@ -9299,23 +9492,7 @@ configure_collect_pending_cf_token() {
     [[ "$CONFIGURE_CERT_CHANGED" == 1 && "$CERT_MODE" == cloudflare ]] \
         || return 0
     cloudflare_credential_required_for_install "$BASE_DOMAIN" || return 0
-    if has_valid_cf_credential; then
-        info "Reusing the saved Cloudflare API token after the locked publication recheck."
-        return 0
-    fi
-    local tok=""
-    [[ -t 0 ]] \
-        && tok="$(ask_secret 'Cloudflare API token (Zone:DNS:Edit scope for your base zone):' || true)"
-    if [[ -z "$tok" || ! "$tok" =~ [^[:space:]] ]]; then
-        err "No Cloudflare API token. Run the attached-terminal TUI; shell environment tokens are not accepted."
-        return 1
-    fi
-    if [[ "$tok" =~ $'\r' || "$tok" =~ $'\n' ]]; then
-        err "Cloudflare API token must not contain CR or LF (check for a trailing newline)."
-        return 1
-    fi
-    PENDING_CF_TOKEN="$tok"
-    info "Cloudflare API token retained only in memory until the locked final recheck."
+    collect_pending_cf_token
 }
 
 configure_commit_pending_cf_token() {
@@ -9324,17 +9501,52 @@ configure_commit_pending_cf_token() {
         || { err "Cloudflare credential publication requires both configure locks."; return 1; }
     configure_assert_certificate_selection || return 1
     cloudflare_credential_required_for_install "$BASE_DOMAIN" || return 0
-    if has_valid_cf_credential; then
+    publish_pending_cf_token
+}
+
+full_install_collect_pending_cf_token() {
+    PENDING_CF_TOKEN=""
+    FULL_INSTALL_CERTIFICATE_SELECTION_STATE="$(
+        certificate_selection_state_fingerprint "$BASE_DOMAIN" "$CERT_MODE"
+    )" || return 1
+    [[ -n "$FULL_INSTALL_CERTIFICATE_SELECTION_STATE" ]] \
+        || { err "Full installation could not pin the certificate selection state."; return 1; }
+    cloudflare_credential_required_for_install "$BASE_DOMAIN" || return 0
+    collect_pending_cf_token
+}
+
+# Recheck every certificate-source fact that decided whether the confirmed
+# candidate needed a credential. This remains read-only and is called under
+# both full-install locks before the first project publication.
+full_install_revalidate_pending_cf_token() {
+    local observed
+    [[ "$INSTALL_LOCK_HELD" == 1 && "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
+        || { err "Cloudflare credential revalidation requires both full-install locks."; return 1; }
+    certificate_selection_state_is_consistent_for_install "$BASE_DOMAIN" "$CERT_MODE" \
+        || return 1
+    observed="$(certificate_selection_state_fingerprint "$BASE_DOMAIN" "$CERT_MODE")" \
+        || return 1
+    [[ -n "${FULL_INSTALL_CERTIFICATE_SELECTION_STATE:-}" \
+       && "$observed" == "$FULL_INSTALL_CERTIFICATE_SELECTION_STATE" ]] \
+        || { err "Certificate lineage ownership or reuse state changed before full-install publication."; return 1; }
+    cloudflare_credential_required_for_install "$BASE_DOMAIN" || return 0
+    cf_credential_publication_slot_is_safe || return 1
+    has_valid_cf_credential && return 0
+    [[ -n "${PENDING_CF_TOKEN:-}" ]] \
+        || { err "The confirmed Cloudflare credential candidate is no longer available."; return 1; }
+}
+
+full_install_commit_pending_cf_token() {
+    [[ "$INSTALL_PUBLICATION_STARTED" == 1 \
+       && "$INSTALL_LOCK_HELD" == 1 \
+       && "$INSTALL_CERT_LOCK_HELD" == 1 ]] \
+        || { err "Cloudflare credential publication requires the active full-install publication boundary and both locks."; return 1; }
+    full_install_revalidate_pending_cf_token || return 1
+    if ! cloudflare_credential_required_for_install "$BASE_DOMAIN"; then
         PENDING_CF_TOKEN=""
         return 0
     fi
-    [[ -n "${PENDING_CF_TOKEN:-}" ]] \
-        || { err "The confirmed Cloudflare credential candidate is no longer available."; return 1; }
-    write_cf_credential "$PENDING_CF_TOKEN" || return 1
-    PENDING_CF_TOKEN=""
-    has_valid_cf_credential \
-        || { err "The locked Cloudflare credential publication could not be verified."; return 1; }
-    ok "Cloudflare API token saved after the locked final recheck."
+    publish_pending_cf_token
 }
 
 configure_update_existing_dns_gateway() {
@@ -10468,6 +10680,7 @@ configure_visible_coordinate_was_committed() {
     [[ "${CONFIGURE_DNS_GATEWAY_COMMIT_STATE:-}" == committed* \
        || "${DNS_ENV_PUBLICATION_COMMIT_STATE:-}" == committed* \
        || "${CERT_ROLE_CTL_COMMIT_STATE:-}" == committed* \
+       || "${CERT_PROVENANCE_COMMIT_STATE:-}" == committed* \
        || "${CONFIGURE_CERT_PUBLICATION_COMPLETED:-0}" == 1 ]]
 }
 
@@ -10539,6 +10752,7 @@ configure_apply_environment_transaction() (
     CONFIGURE_DNS_GATEWAY_COMMIT_STATE=not-committed
     CONFIGURE_CERT_PUBLICATION_COMPLETED=0
     CERT_ROLE_CTL_COMMIT_STATE=""
+    CERT_PROVENANCE_COMMIT_STATE=not-committed
     CONFIGURE_RUNTIME_QUIESCED_BY_US=0
     CONFIGURE_RUNTIME_FENCE_ATTEMPTED=0
     CONFIGURE_RUNTIME_FENCED_BY_US=0
@@ -10602,6 +10816,7 @@ configure_apply_certificate_transaction() (
     DNS_ENV_PUBLICATION_COMMIT_STATE=not-committed
     CONFIGURE_CERT_PUBLICATION_COMPLETED=0
     CERT_ROLE_CTL_COMMIT_STATE=""
+    CERT_PROVENANCE_COMMIT_STATE=not-committed
     CONFIGURE_EXPECTED_OLD_GATEWAY="$expected_old_gateway"
     configure_certificate_finish() {
         local final_rc="$1"
@@ -10682,6 +10897,7 @@ configure_apply_certificate_transaction() (
         fi
         if [[ "$cert_install_rc" != 0 ]]; then
             if [[ "${CERT_ROLE_CTL_COMMIT_STATE:-}" != committed* \
+               && "${CERT_PROVENANCE_COMMIT_STATE:-}" != committed* \
                && "${CONFIGURE_CERT_PUBLICATION_COMPLETED:-0}" != 1 ]]; then
                 configure_rearm_runtime_restore_after_failed_commit || true
             fi
@@ -10948,6 +11164,8 @@ delegate_pinned_channel_switch() {
 full_install() {
     local mode="" postcommit_failed=0
     local reveal_console_connection=0
+    local PENDING_CF_TOKEN=""
+    local FULL_INSTALL_CERTIFICATE_SELECTION_STATE=""
     INSTALL_PUBLICATION_STARTED=0
     LOADED_DNS_ENV_SOURCE_STATE=""
     LOADED_DNS_ENV_SOURCE_REVISION=""
@@ -11015,12 +11233,10 @@ full_install() {
         return 1
     }
     # The shared TUI never persists a credential while the operator is still
-    # editing or may cancel the candidate. A full install nevertheless keeps a
-    # missing Cloudflare credential on the fail-before-publication side by
-    # collecting it only after the complete candidate and operator YAML agree.
-    if cloudflare_credential_required_for_install "$BASE_DOMAIN"; then
-        ensure_cf_token
-    fi
+    # editing or may cancel the candidate. Pin the complete certificate-source
+    # decision now and retain any missing token only in this process until the
+    # final locked publication boundary.
+    full_install_collect_pending_cf_token
     # Package installation may add shared OS packages, but no live 5gpn file has
     # been removed or replaced yet. Debug mode deliberately skips Certbot.
     phase "installing host dependencies" "安装主机依赖"
@@ -11059,9 +11275,7 @@ full_install() {
     if certbot_transaction_requires_global_timer_pause "$BASE_DOMAIN" "$CERT_MODE"; then
         pause_global_certbot_timer
     fi
-    if cloudflare_credential_required_for_install "$BASE_DOMAIN"; then
-        ensure_cf_token
-    fi
+    full_install_revalidate_pending_cf_token
     certificate_selection_state_is_consistent_for_install "$BASE_DOMAIN" "$CERT_MODE"
     validate_quick_installer_generation || return 1
     assert_release_pin_bundle_revision \
@@ -11069,6 +11283,8 @@ full_install() {
     INSTALL_PHASE="starting publication by claiming project roots"
     INSTALL_PUBLICATION_STARTED=1
     claim_project_roots
+    INSTALL_PHASE="publishing the confirmed Cloudflare credential"
+    full_install_commit_pending_cf_token
     revalidate_claimed_persisted_dns_env
     phase "quiescing runtime state writers" "暂停运行时写入"
     stop_managed_runtime_units

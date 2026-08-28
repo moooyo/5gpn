@@ -192,6 +192,9 @@ _ui_generation_sync_tree() {
 # callers do not override it; no path or data is accepted through the environment.
 _ui_generation_before_current_commit() { :; }
 
+# Source-level test seam for a deterministic final-GC protection race.
+_ui_generation_before_gc_rename() { :; }
+
 _ui_generation_find_entries() { # <array-name> <find arguments before -print0>
     local array_name="$1" fd item completed=0
     local -a collected=()
@@ -307,6 +310,10 @@ _ui_generation_name_is_safe() {
 
 _ui_generation_candidate_name_is_safe() {
     [[ "${1:-}" =~ ^\.candidate-generation-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9A-Za-z]{6}$ ]]
+}
+
+_ui_generation_tombstone_name_is_safe() {
+    [[ "${1:-}" =~ ^\.delete\.[0-9]+\.[0-9]+$ ]]
 }
 
 _ui_generation_current_target() {
@@ -566,6 +573,185 @@ _ui_generation_candidate_preclaim_is_safe() {
     [[ "$size" =~ ^[0-9]+$ && "$size" -le 128 ]]
 }
 
+_ui_generation_tombstone_scope_is_safe() {
+    local root="$1" tombstone="$2" generations="$1/generations" name canonical
+    name="$(basename -- "$tombstone")" || return 1
+    _ui_generation_tombstone_name_is_safe "$name" || return 1
+    [[ "$tombstone" == "$generations/$name" \
+       && "$(dirname -- "$tombstone")" == "$generations" ]] || return 1
+    _ui_generation_directory_is_exact "$root" "$generations" 755 || return 1
+    [[ -d "$tombstone" && ! -L "$tombstone" ]] || return 1
+    canonical="$(readlink -f -- "$tombstone" 2>/dev/null)" || return 1
+    [[ "$canonical" == "$tombstone" ]] || return 1
+    _ui_generation_same_mount_boundary "$generations" "$tombstone"
+}
+
+_ui_generation_tombstone_is_safe() {
+    local root="$1" tombstone="$2" entry name marker_seen=0
+    local -a entries=()
+    _ui_generation_tombstone_scope_is_safe "$root" "$tombstone" || return 1
+    _ui_generation_plain_tree_is_safe "$root" "$tombstone" 1 || return 1
+    _ui_generation_find_entries entries "$tombstone" -mindepth 1 -maxdepth 1 || return 1
+    for entry in "${entries[@]}"; do
+        name="$(basename -- "$entry")" || return 1
+        [[ "$name" == "$UI_GENERATION_ENTRY_MARKER" ]] || continue
+        _ui_generation_plain_file_is_safe "$root" "$entry" 644 \
+            && printf '%s\n' "$UI_GENERATION_ENTRY_MARKER_VALUE" | cmp -s - "$entry" \
+            || return 1
+        marker_seen=1
+    done
+    # The empty form is the narrow recoverable state after the marker unlink
+    # when the final rmdir was interrupted or failed.
+    [[ "$marker_seen" == 1 || "${#entries[@]}" == 0 ]]
+}
+
+_ui_generation_tombstone_entry_is_safe() {
+    local root="$1" tombstone="$2" entry="$3" relative canonical
+    local expected_uid expected_gid
+    [[ "$entry" == "$tombstone"/* ]] || return 1
+    relative="${entry#"$tombstone"/}"
+    _ui_generation_relative_path_is_safe "$relative" || return 1
+    [[ "$entry" != "$tombstone/$UI_GENERATION_ENTRY_MARKER" ]] || return 1
+    canonical="$(readlink -f -- "$entry" 2>/dev/null)" || return 1
+    [[ "$canonical" == "$entry" ]] || return 1
+    _ui_generation_same_mount_boundary "$tombstone" "$entry" || return 1
+    expected_uid="$(_ui_generation_expected_uid "$root")" || return 1
+    expected_gid="$(_ui_generation_expected_gid "$root")" || return 1
+    [[ "$(_ui_generation_uid "$entry")" == "$expected_uid" \
+       && "$(_ui_generation_gid "$entry")" == "$expected_gid" ]] || return 1
+    if [[ -d "$entry" && ! -L "$entry" ]]; then
+        [[ "$(_ui_generation_mode "$entry")" == 755 ]]
+    else
+        [[ -f "$entry" && ! -L "$entry" \
+           && "$(_ui_generation_mode "$entry")" == 644 \
+           && "$(_ui_generation_nlink "$entry")" == 1 ]]
+    fi
+}
+
+_ui_generation_remove_tombstone_exact() {
+    local root="$1" tombstone="$2" allow_incomplete="${3:-0}"
+    local entry target live marker
+    local -a entries=() remaining=()
+    _ui_generation_root_boundary_is_safe \
+        "$root" "$allow_incomplete" "" "$allow_incomplete" || return 1
+    _ui_generation_path_is_absolute_safe "$root" || return 1
+    _ui_generation_directory_is_exact "$root" "$root" 755 || return 1
+    _ui_generation_marker_is_safe "$root" || return 1
+    _ui_generation_same_mount_boundary "$root" "$root/generations" || return 1
+    _ui_generation_no_nested_mounts "$root/generations" || return 1
+    _ui_generation_tombstone_is_safe "$root" "$tombstone" || return 1
+    target="$(_ui_generation_current_target "$root")" || return 1
+    [[ "$target" != "generations/$(basename -- "$tombstone")" ]] || return 1
+    _ui_generation_find_entries entries "$tombstone" -xdev -depth -mindepth 1 || return 1
+    marker="$tombstone/$UI_GENERATION_ENTRY_MARKER"
+    for entry in "${entries[@]}"; do
+        [[ "$entry" != "$marker" ]] || continue
+        _ui_generation_tombstone_scope_is_safe "$root" "$tombstone" || return 1
+        _ui_generation_tombstone_entry_is_safe "$root" "$tombstone" "$entry" || return 1
+        live="$(_ui_generation_current_target "$root")" || return 1
+        [[ "$live" == "$target" ]] || return 1
+        if [[ -d "$entry" && ! -L "$entry" ]]; then
+            rmdir -- "$entry" || return 1
+        else
+            rm -f -- "$entry" || return 1
+        fi
+    done
+    _ui_generation_tombstone_is_safe "$root" "$tombstone" || return 1
+    _ui_generation_find_entries remaining "$tombstone" -mindepth 1 -maxdepth 1 || return 1
+    if ((${#remaining[@]} > 0)); then
+        [[ "${#remaining[@]}" == 1 && "${remaining[0]}" == "$marker" ]] || return 1
+        _ui_generation_plain_file_is_safe "$root" "$marker" 644 \
+            && printf '%s\n' "$UI_GENERATION_ENTRY_MARKER_VALUE" | cmp -s - "$marker" \
+            || return 1
+        # Make every content unlink durable while the ownership marker still
+        # proves the partial tree. After this fence, either marker state is a
+        # safe restart point.
+        sync -f "$tombstone" || return 1
+        _ui_generation_tombstone_is_safe "$root" "$tombstone" || return 1
+        _ui_generation_find_entries remaining "$tombstone" -mindepth 1 -maxdepth 1 \
+            || return 1
+        [[ "${#remaining[@]}" == 1 && "${remaining[0]}" == "$marker" ]] || return 1
+        live="$(_ui_generation_current_target "$root")" || return 1
+        [[ "$live" == "$target" ]] || return 1
+        rm -f -- "$marker" || return 1
+        sync -f "$tombstone" || return 1
+    fi
+    _ui_generation_tombstone_is_safe "$root" "$tombstone" || return 1
+    _ui_generation_no_nested_mounts "$tombstone" || return 1
+    live="$(_ui_generation_current_target "$root")" || return 1
+    [[ "$live" == "$target" ]] || return 1
+    rmdir -- "$tombstone" || return 1
+    sync -f "$root/generations"
+}
+
+_ui_generation_new_tombstone_path() {
+    local root="$1" generations="$1/generations" tombstone
+    tombstone="$generations/.delete.${BASHPID}.${RANDOM}"
+    _ui_generation_tombstone_name_is_safe "$(basename -- "$tombstone")" || return 1
+    [[ ! -e "$tombstone" && ! -L "$tombstone" ]] || return 1
+    printf '%s\n' "$tombstone"
+}
+
+_ui_generation_entry_is_unprotected() {
+    local root="$1" entry="$2" expected_current="${3:-}" previous="${4:-}"
+    local live relative previous_name
+    live="$(_ui_generation_current_target "$root")" || return 1
+    [[ -z "$expected_current" || "$live" == "$expected_current" ]] || return 1
+    if [[ -n "$previous" && "$previous" != absent ]]; then
+        [[ "$previous" == generations/* ]] || return 1
+        previous_name="${previous#generations/}"
+        _ui_generation_name_is_safe "$previous_name" || return 1
+        [[ "$previous" == "generations/$previous_name" ]] || return 1
+    fi
+    relative="generations/$(basename -- "$entry")"
+    [[ "$relative" != "$live" \
+       && ( -z "$previous" || "$previous" == absent || "$relative" != "$previous" ) ]]
+}
+
+_ui_generation_remove_generation() {
+    local root="$1" entry="$2" protected_current="${3:-}" protected_previous="${4:-}"
+    local name tombstone
+    name="$(basename -- "$entry")" || return 1
+    _ui_generation_name_is_safe "$name" || return 1
+    [[ "$entry" == "$root/generations/$name" ]] || return 1
+    _ui_generation_root_boundary_is_safe "$root" 0 || return 1
+    _ui_generation_complete_is_safe "$root" "$entry" || return 1
+    _ui_generation_same_mount_boundary "$root/generations" "$entry" || return 1
+    tombstone="$(_ui_generation_new_tombstone_path "$root")" || return 1
+    if ! _ui_generation_before_gc_rename \
+            "$root" "$entry" "$protected_current" "$protected_previous" \
+       || ! _ui_generation_root_boundary_is_safe "$root" 0 \
+       || ! _ui_generation_complete_is_safe "$root" "$entry" \
+       || ! _ui_generation_no_nested_mounts "$entry" \
+       || ! _ui_generation_same_mount_boundary "$root/generations" "$entry" \
+       || ! _ui_generation_entry_is_unprotected \
+            "$root" "$entry" "$protected_current" "$protected_previous"; then
+        return 1
+    fi
+    mv -T -- "$entry" "$tombstone" || return 1
+    # The rename is the deletion commit: after this directory sync, an
+    # interruption can leave only an unreachable, strictly owned tombstone.
+    sync -f "$root/generations" || return 1
+    _ui_generation_tombstone_is_safe "$root" "$tombstone" || return 1
+    _ui_generation_remove_tombstone_exact "$root" "$tombstone"
+}
+
+ui_generation_cleanup_tombstones() {
+    local root="${1:-$UI_GENERATION_ROOT}" allow_incomplete="${2:-0}" entry name
+    local -a entries=()
+    _ui_generation_root_boundary_is_safe \
+        "$root" "$allow_incomplete" "" "$allow_incomplete" || return 1
+    _ui_generation_find_entries entries "$root/generations" -mindepth 1 -maxdepth 1 \
+        || return 1
+    for entry in "${entries[@]}"; do
+        name="$(basename -- "$entry")" || return 1
+        _ui_generation_tombstone_name_is_safe "$name" || continue
+        _ui_generation_tombstone_is_safe "$root" "$entry" || return 1
+        _ui_generation_remove_tombstone_exact \
+            "$root" "$entry" "$allow_incomplete" || return 1
+    done
+}
+
 ui_generation_candidate_is_safe() {
     _ui_generation_candidate_is_safe "$1" "$2"
 }
@@ -612,6 +798,8 @@ _ui_generation_root_boundary_is_safe() {
                 || { [[ "$allow_incomplete" == 1 ]] \
                      && _ui_generation_candidate_preclaim_is_safe "$root" "$entry"; } \
                 || return 1
+        elif _ui_generation_tombstone_name_is_safe "$name"; then
+            _ui_generation_tombstone_is_safe "$root" "$entry" || return 1
         else
             return 1
         fi
@@ -732,6 +920,7 @@ ui_generation_claim_root() {
     fi
     ui_generation_cleanup_orphan_candidates "$root" || return 1
     ui_generation_cleanup_orphan_current_links "$root" || return 1
+    ui_generation_cleanup_tombstones "$root" || return 1
     _ui_generation_root_boundary_is_safe "$root" 0
 }
 
@@ -743,6 +932,7 @@ ui_generation_prepare_existing_current() {
     _ui_generation_marker_is_safe "$root" || return 1
     [[ -d "$root/generations" && ! -L "$root/generations" ]] || return 1
     ui_generation_cleanup_orphan_current_links "$root" || return 1
+    ui_generation_cleanup_tombstones "$root" 1 || return 1
     _ui_generation_current_only_is_safe "$root"
 }
 
@@ -1029,27 +1219,31 @@ ui_generation_cleanup_orphan_candidates() {
 }
 
 _ui_generation_remove_entry() {
-    local root="$1" entry="$2" protected_current="${3:-}" name relative live
+    local root="$1" entry="$2" protected_current="${3:-}"
+    local protected_previous="${4:-}" name
     name="$(basename -- "$entry")" || return 1
     if _ui_generation_candidate_name_is_safe "$name"; then
         _ui_generation_candidate_is_safe "$root" "$entry" || return 1
     elif _ui_generation_name_is_safe "$name"; then
-        _ui_generation_complete_is_safe "$root" "$entry" || return 1
+        _ui_generation_remove_generation \
+            "$root" "$entry" "$protected_current" "$protected_previous"
+        return
+    elif _ui_generation_tombstone_name_is_safe "$name"; then
+        _ui_generation_remove_tombstone_exact "$root" "$entry"
+        return
     else
         return 1
     fi
     _ui_generation_no_nested_mounts "$entry" || return 1
-    if [[ -n "$protected_current" ]]; then
-        live="$(_ui_generation_current_target "$root")" || return 1
-        relative="generations/$name"
-        [[ "$live" == "$protected_current" && "$relative" != "$live" ]] || return 1
-    fi
+    _ui_generation_entry_is_unprotected \
+        "$root" "$entry" "$protected_current" "$protected_previous" || return 1
     rm -rf -- "$entry"
 }
 
 _ui_generation_cleanup_after_publish() {
     local root="$1" current="$2" previous="$3" entry name relative live
     local -a entries=()
+    ui_generation_cleanup_tombstones "$root" || return 1
     _ui_generation_find_entries entries "$root/generations" -mindepth 1 -maxdepth 1 || return 1
     for entry in "${entries[@]}"; do
         live="$(_ui_generation_current_target "$root")" || return 1
@@ -1057,7 +1251,7 @@ _ui_generation_cleanup_after_publish() {
         name="$(basename -- "$entry")"
         relative="generations/$name"
         [[ "$relative" == "$live" || "$relative" == "$previous" ]] && continue
-        _ui_generation_remove_entry "$root" "$entry" "$current" || return 1
+        _ui_generation_remove_entry "$root" "$entry" "$current" "$previous" || return 1
     done
     sync -f "$root/generations"
 }
@@ -1131,14 +1325,17 @@ ui_generation_remove_root() {
     _ui_generation_root_boundary_is_safe "$root" 1 "" 1 || return 1
     if [[ -d "$root/generations" && ! -L "$root/generations" ]]; then
         ui_generation_cleanup_orphan_current_links "$root" || return 1
+        ui_generation_cleanup_tombstones "$root" || return 1
     fi
-    # Validate the complete tree before the first unlink. Every recursive
-    # target below carries its own generation marker and is revalidated again
-    # immediately before deletion.
+    # Validate the complete tree before the first unlink. Formal generations
+    # are revalidated, tombstoned, and removed one plain entry at a time.
     if [[ -e "$root/current" || -L "$root/current" ]]; then
         _ui_generation_current_target "$root" >/dev/null || return 1
         rm -f -- "$root/current" || return 1
     fi
+    # This is unconditional so a retry after an earlier failed sync still
+    # makes withdrawal of the only public pointer durable before GC resumes.
+    sync -f "$root" || return 1
     if [[ -d "$root/generations" && ! -L "$root/generations" ]]; then
         _ui_generation_find_entries generation_entries "$root/generations" -mindepth 1 -maxdepth 1 \
             || return 1

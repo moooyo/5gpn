@@ -205,20 +205,18 @@ sudo chown 10001:10001 \
 sudo chmod 0600 docker/bootstrap/config.env docker/bootstrap/cloudflare_api_token
 ```
 
-Confirm Engine 28+, cgroup v2, and the systemd driver, then start an explicit
-tag. Stable publication updates the convenience registry alias `latest`, but
-the release bundle never defaults to a movable alias; beta never updates it:
-
-> [!IMPORTANT]
-> Docker v2 is not published yet. The pinned Core and Console pair carries the
-> v2 contract, both are immutable releases, and the image passed release-mode
-> acceptance on 2026-08-22 — but nothing has been pushed to `ghcr.io/moooyo/5gpn`,
-> which does not exist yet. No current tag is a Docker v2 image.
+Confirm Engine 28+, cgroup v2, and the systemd driver, then take the complete
+`tag@sha256` reference from the `OCI image:` line in the selected GitHub
+Release body. Only a Release that records that reference has a matching Docker
+image. Stable publication updates the convenience registry alias `latest`, but
+deployments must not use that movable alias; beta never updates it:
 
 ```bash
 docker version --format '{{.Server.Version}}'
 docker info --format '{{.CgroupVersion}} {{.CgroupDriver}}'
-export FIVEGPN_IMAGE=ghcr.io/moooyo/5gpn:X.Y.Z
+TAG=X.Y.Z
+IMAGE_DIGEST=sha256:REPLACE_WITH_RELEASE_MANIFEST_DIGEST
+export FIVEGPN_IMAGE="ghcr.io/moooyo/5gpn:${TAG}@${IMAGE_DIGEST}"
 docker compose pull gateway
 docker compose up -d gateway
 docker compose logs -f gateway
@@ -239,7 +237,8 @@ runtime documents through `5gpn-state validate --owner-uid` and operator YAML
 through owner-scoped `5gpn-config inspect-controller --owner-uid` v2.
 Volumes produced by the retired container-runtime-v1 layout are rejected
 unchanged and have no in-place migration path. To upgrade a future v2
-deployment, change `FIVEGPN_IMAGE`, then run `pull` and `up -d` again. Do not run
+deployment, change `FIVEGPN_IMAGE` to the complete `tag@sha256` reference from
+the new Release body, then run `pull` and `up -d` again. Do not run
 `docker compose down -v` unless you intend to remove configuration, ACME state,
 the interception CA, Console generations, and both signed profiles.
 

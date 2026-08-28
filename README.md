@@ -198,20 +198,17 @@ sudo chown 10001:10001 \
 sudo chmod 0600 docker/bootstrap/config.env docker/bootstrap/cloudflare_api_token
 ```
 
-确认 Engine 28+、cgroup v2 和 systemd driver 后，以明确 tag 启动。稳定发布
-会更新 registry 的便利别名 `latest`，但 release bundle 不默认使用可移动别名；
-beta 不会更新它：
-
-> [!IMPORTANT]
-> Docker v2 尚未发布。当前 pin 的 Core/Console 配对已具备 v2 contract 且都是
-> 不可变发布，镜像也已于 2026-08-22 通过 release-mode 验收 —— 但尚未向
-> `ghcr.io/moooyo/5gpn` 推送过任何内容，该镜像库还不存在。现有 tag 都不是
-> Docker v2 镜像。
+确认 Engine 28+、cgroup v2 和 systemd driver 后，从所选 GitHub Release 正文的
+`OCI image:` 行取得完整 `tag@sha256` 引用并启动。只有正文记录了该引用的 Release
+才提供配套 Docker 镜像。稳定发布会更新 registry 的便利别名 `latest`，但部署不应
+使用这个可移动别名；beta 不会更新它：
 
 ```bash
 docker version --format '{{.Server.Version}}'
 docker info --format '{{.CgroupVersion}} {{.CgroupDriver}}'
-export FIVEGPN_IMAGE=ghcr.io/moooyo/5gpn:X.Y.Z
+TAG=X.Y.Z
+IMAGE_DIGEST=sha256:REPLACE_WITH_RELEASE_MANIFEST_DIGEST
+export FIVEGPN_IMAGE="ghcr.io/moooyo/5gpn:${TAG}@${IMAGE_DIGEST}"
 docker compose pull gateway
 docker compose up -d gateway
 docker compose logs -f gateway
@@ -228,7 +225,8 @@ Docker socket 或宿主 cgroup bind mount。持久数据拆分为
 当前六个安装坐标；pinned Core 通过 `5gpn-state validate --owner-uid` 校验 runtime
 documents，并通过 owner-scoped `5gpn-config inspect-controller --owner-uid` v2
 校验运维者 YAML。旧 container-runtime-v1 volume 会原样 hard reject，不提供原地
-迁移。未来 v2 升级只需切换 `FIVEGPN_IMAGE` 后再次 `pull` 和 `up -d`；不要执行
+迁移。未来 v2 升级只需将 `FIVEGPN_IMAGE` 切换为新 Release 正文中的完整
+`tag@sha256` 引用，再次 `pull` 和 `up -d`；不要执行
 `docker compose down -v`，除非确实要删除配置、ACME 状态、interception CA、
 Console generations 与两个签名 profile。
 

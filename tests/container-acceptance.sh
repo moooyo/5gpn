@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Authoritative Docker 28/cgroup-v2 acceptance gate. Every behavioral probe is
-# versioned beside this driver under tests/docker; the test host supplies only
-# the candidate, controller credential, and optional narrow connection inputs.
+# Authoritative Docker 28/cgroup-v2 acceptance contract. Every behavioral probe
+# is versioned beside this driver under tests/docker; the test host supplies only
+# the candidate identity and an optional controller trust bundle.
 set -Eeuo pipefail
 export LC_ALL=C
 
@@ -32,10 +32,9 @@ Required for every run:
   FIVEGPN_ACCEPTANCE_HOST=test-env
   FIVEGPN_ACCEPTANCE_TARGET=disposable
   FIVEGPN_EXPECTED_COMMIT=<40-hex candidate 5gpn commit>
-  FIVEGPN_CAPABILITIES_URL=https://console.example/capabilities
-  FIVEGPN_CONTROLLER_SECRET_FILE=/root/acceptance/controller-secret
 
 Release mode (default) additionally requires:
+  FIVEGPN_EXPECTED_RELEASE_TAG=<exact X.Y.Z or X.Y.Z-beta.N tag>
   FIVEGPN_EXPECTED_MIHOMO_SHA256=<64-hex compressed release artifact digest>
 
 Development mode must instead set:
@@ -44,18 +43,16 @@ Development mode must instead set:
   FIVEGPN_DEVELOPMENT_PROJECT=<safe test project name>
   FIVEGPN_DEVELOPMENT_BIND_IP=127.0.0.1
   FIVEGPN_DEVELOPMENT_HOST_PORTS='{"853":2853,"80":20080,"443":20443,"8080":28080,"8443":28443}'
-  FIVEGPN_CAPABILITIES_URL=https://console.example:20443/capabilities
 
-Optional narrow controller connection inputs:
-  FIVEGPN_CONTROLLER_RESOLVE_IP=<IPv4 address for console hostname>
+Optional controller trust input:
   FIVEGPN_CONTROLLER_CA_FILE=<PEM CA bundle>
 
 The candidate must have been created from the repository Compose contract.
 This driver executes only the fixed, versioned probes under tests/docker. It
 performs no site-owned callback. Release mode accepts only a pinned-release
-image and emits the three release-gate evidence values. Development mode
-accepts only a development-local image and deliberately emits differently
-named evidence that cannot satisfy the release gate.
+image and emits its exact candidate descriptor. Development mode accepts only
+a development-local image and labels its output so it cannot be mistaken for
+release evidence.
 EOF
 	exit "$status"
 }
@@ -73,6 +70,7 @@ CONTAINER="$1"
 
 ACCEPTANCE_MODE="${FIVEGPN_ACCEPTANCE_MODE:-release}"
 EXPECTED_COMMIT="${FIVEGPN_EXPECTED_COMMIT:-}"
+EXPECTED_RELEASE_TAG="${FIVEGPN_EXPECTED_RELEASE_TAG:-}"
 EXPECTED_MIHOMO_SHA256="${FIVEGPN_EXPECTED_MIHOMO_SHA256:-}"
 EXPECTED_MIHOMO_BINARY_SHA256="${FIVEGPN_EXPECTED_MIHOMO_BINARY_SHA256:-}"
 DEVELOPMENT_PROJECT="${FIVEGPN_DEVELOPMENT_PROJECT:-}"
@@ -80,17 +78,26 @@ DEVELOPMENT_BIND_IP="${FIVEGPN_DEVELOPMENT_BIND_IP:-}"
 DEVELOPMENT_HOST_PORTS="${FIVEGPN_DEVELOPMENT_HOST_PORTS:-}"
 [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
     || { echo 'FIVEGPN_EXPECTED_COMMIT must be one exact 40-hex commit' >&2; exit 2; }
+release_number='(0|[1-9][0-9]*)'
+stable_release_re="^${release_number}\.${release_number}\.${release_number}$"
+beta_release_re="^${release_number}\.${release_number}\.${release_number}-beta\.([1-9][0-9]*)$"
+expected_release_tag_valid=false
+if [[ "$EXPECTED_RELEASE_TAG" =~ $stable_release_re \
+   || "$EXPECTED_RELEASE_TAG" =~ $beta_release_re ]]; then
+    expected_release_tag_valid=true
+fi
 case "$ACCEPTANCE_MODE" in
     release)
-        [[ "$EXPECTED_MIHOMO_SHA256" =~ ^[0-9a-f]{64}$ \
+        [[ "$expected_release_tag_valid" == true \
+           && "$EXPECTED_MIHOMO_SHA256" =~ ^[0-9a-f]{64}$ \
            && -z "$EXPECTED_MIHOMO_BINARY_SHA256" \
            && -z "$DEVELOPMENT_PROJECT" && -z "$DEVELOPMENT_BIND_IP" \
            && -z "$DEVELOPMENT_HOST_PORTS" ]] \
-            || { echo 'release acceptance requires only the compressed mihomo artifact SHA-256' >&2; exit 2; }
+            || { echo 'release acceptance requires an exact release tag and only the compressed mihomo artifact SHA-256' >&2; exit 2; }
         ;;
     development)
         [[ "$EXPECTED_MIHOMO_BINARY_SHA256" =~ ^[0-9a-f]{64}$ \
-           && -z "$EXPECTED_MIHOMO_SHA256" \
+           && -z "$EXPECTED_RELEASE_TAG" && -z "$EXPECTED_MIHOMO_SHA256" \
            && "$DEVELOPMENT_PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ \
            && "$DEVELOPMENT_BIND_IP" == 127.0.0.1 \
            && -n "$DEVELOPMENT_HOST_PORTS" ]] \
@@ -238,6 +245,7 @@ assert_container_boundary() {
         ($options | index("mode=" + $mode) != null);
       length == 1 and
       .[0].State.Running == true and
+      .[0].RestartCount == 0 and
       .[0].Config.User == "10001:10001" and
       .[0].Path == "/opt/5gpn/bin/docker-entrypoint.sh" and
       ([.[0].Config.Env[] | select(. == "FIVEGPN_RUNTIME=container")] | length) == 1 and
@@ -330,6 +338,7 @@ assert_container_boundary() {
     image_id="$(jq -r '.[0].Image' <<<"$inspect")"
     labels="$(docker image inspect "$image_id" | jq -S -c '.[0].Config.Labels')"
     jq -e --arg commit "$EXPECTED_COMMIT" --arg mode "$ACCEPTANCE_MODE" \
+      --arg release_tag "$EXPECTED_RELEASE_TAG" \
       --arg artifact "$EXPECTED_MIHOMO_SHA256" --arg binary "$EXPECTED_MIHOMO_BINARY_SHA256" \
       --arg core_version "$MIHOMO_VERSION" --arg zash_version "$ZASH_VERSION" \
       --arg zash_sha "$ZASH_SHA256" '
@@ -341,6 +350,7 @@ assert_container_boundary() {
       .[0].Config.Labels["io.5gpn.zashboard.sha256"] == $zash_sha and
       (.[0].Config.Labels["io.5gpn.mihomo.binary.sha256"] | test("^[0-9a-f]{64}$")) and
       (if $mode == "release" then
+         .[0].Config.Labels["org.opencontainers.image.version"] == $release_tag and
          .[0].Config.Labels["io.5gpn.mihomo.source"] == "pinned-release" and
          .[0].Config.Labels["io.5gpn.mihomo.sha256"] == $artifact
        else
@@ -377,7 +387,45 @@ assert_container_boundary() {
     printf '%s\n' "$labels"
 }
 
+wait_for_controller_tls_listener() {
+    local deadline=$((SECONDS + 90))
+    while ((SECONDS < deadline)); do
+        docker inspect "$CONTAINER" \
+            | jq -e '
+              .[0].State.Running == true and
+              .[0].State.Pid > 0 and
+              .[0].RestartCount == 0
+            ' >/dev/null \
+            || { echo 'candidate stopped or restarted before its Controller TLS listener became ready' >&2; return 1; }
+        if timeout 5 openssl s_client \
+            -connect "127.0.0.1:${HOST_PORT_443}" \
+            </dev/null >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo 'candidate Controller TLS listener did not become ready' >&2
+    return 1
+}
+
+wait_for_controller_tls_listener
 before_image_labels="$(assert_container_boundary)"
+before_image="$(docker inspect --format '{{.Image}}' "$CONTAINER")"
+[[ "$before_image" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || { echo 'candidate container has no exact image config digest' >&2; exit 1; }
+candidate_descriptor="$(jq -S -c -n \
+    --arg mode "$ACCEPTANCE_MODE" \
+    --arg release_tag "$EXPECTED_RELEASE_TAG" \
+    --arg commit "$EXPECTED_COMMIT" \
+    --arg image_config_digest "$before_image" '
+      {
+        mode: $mode,
+        release_tag: (if $release_tag == "" then null else $release_tag end),
+        commit: $commit,
+        image_config_digest: $image_config_digest,
+        platform: "linux/amd64"
+      }
+    ')"
 
 check_process_boundary() {
     docker exec "$CONTAINER" /bin/bash -euo pipefail -c '
@@ -425,39 +473,7 @@ check_process_boundary() {
     '
 }
 
-CAPABILITIES_URL="${FIVEGPN_CAPABILITIES_URL:-}"
-SECRET_FILE="${FIVEGPN_CONTROLLER_SECRET_FILE:-}"
-CONTROLLER_RESOLVE_IP="${FIVEGPN_CONTROLLER_RESOLVE_IP:-}"
 CONTROLLER_CA_FILE="${FIVEGPN_CONTROLLER_CA_FILE:-}"
-if [[ "$CAPABILITIES_URL" =~ ^https://([a-z0-9][a-z0-9.-]{0,251}[a-z0-9])(:([0-9]{1,5}))?/capabilities$ ]]; then
-    CONTROLLER_HOST="${BASH_REMATCH[1]}"
-    CONTROLLER_PORT="${BASH_REMATCH[3]:-443}"
-else
-    echo 'FIVEGPN_CAPABILITIES_URL must be an https hostname on /capabilities' >&2
-    exit 2
-fi
-[[ "$CONTROLLER_PORT" == "$HOST_PORT_443" ]] \
-    || { echo 'capabilities URL port must match the accepted HTTPS host publication' >&2; exit 2; }
-[[ -f "$SECRET_FILE" && ! -L "$SECRET_FILE" \
-   && "$(stat -c %a "$SECRET_FILE")" == 600 \
-   && "$(stat -c %h "$SECRET_FILE")" == 1 \
-   && "$(stat -c %s "$SECRET_FILE")" -le 4096 ]] \
-    || { echo 'controller secret file must be a bounded mode-0600 regular single-link file' >&2; exit 2; }
-mapfile -t secret_lines < "$SECRET_FILE"
-[[ "${#secret_lines[@]}" == 1 \
-   && "${#secret_lines[0]}" -ge 16 \
-   && "${#secret_lines[0]}" -le 512 \
-   && "${secret_lines[0]}" != *[[:space:]]* ]] \
-    || { echo 'controller secret file must contain one bounded non-whitespace token' >&2; exit 2; }
-if [[ -n "$CONTROLLER_RESOLVE_IP" ]]; then
-    [[ "$CONTROLLER_RESOLVE_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
-        || { echo 'FIVEGPN_CONTROLLER_RESOLVE_IP must be IPv4' >&2; exit 2; }
-    IFS=. read -r -a resolve_octets <<<"$CONTROLLER_RESOLVE_IP"
-    for octet in "${resolve_octets[@]}"; do
-        [[ "$octet" != 0* || "$octet" == 0 ]] && ((10#$octet <= 255)) \
-            || { echo 'FIVEGPN_CONTROLLER_RESOLVE_IP is not canonical IPv4' >&2; exit 2; }
-    done
-fi
 if [[ -n "$CONTROLLER_CA_FILE" ]]; then
     [[ -f "$CONTROLLER_CA_FILE" && ! -L "$CONTROLLER_CA_FILE" \
        && "$(stat -c %h "$CONTROLLER_CA_FILE")" == 1 \
@@ -489,17 +505,126 @@ cleanup() {
     return "$rc"
 }
 trap cleanup EXIT
-printf 'Authorization: Bearer %s\n' "${secret_lines[0]}" > "$header_file"
-CONTROLLER_SECRET="${secret_lines[0]}"
-unset secret_lines
+
+inspect_candidate_controller() {
+    docker exec "$CONTAINER" /opt/5gpn/bin/5gpn-mihomo \
+        5gpn-config inspect-controller --owner-uid 10001 \
+        --config /etc/5gpn/mihomo/config.yaml
+}
+
+validate_candidate_controller_projection() {
+    jq -e '
+      type == "object" and .version == 2 and
+      (.raw_revision | test("^[0-9a-f]{64}$")) and
+      .external_controller_tls == "127.0.0.1:443" and
+      .external_ui == "/opt/5gpn/ui/current" and
+      .certificate == "/etc/5gpn/cert/console/current/fullchain.pem" and
+      .private_key == "/etc/5gpn/cert/console/current/privkey.pem" and
+      (.secret | type == "string" and length >= 16 and length <= 256) and
+      ((keys | sort) == ["certificate","external_controller_tls","external_ui",
+                         "private_key","raw_revision","secret","version"])
+    ' <<<"$1" >/dev/null
+}
+
+host_served_leaf_sha256() {
+    local port="$1" name="$2" output leaf_sha
+    local -a args=(
+        -connect "127.0.0.1:${port}"
+        -servername "$name"
+        -verify_hostname "$name"
+        -verify_return_error
+        -showcerts
+    )
+    [[ -z "$CONTROLLER_CA_FILE" ]] || args+=(-CAfile "$CONTROLLER_CA_FILE")
+    output="$(timeout 12 openssl s_client "${args[@]}" </dev/null 2>/dev/null)" \
+        || { echo "host TLS publication failed for $name on port $port" >&2; return 1; }
+    leaf_sha="$(openssl x509 -outform DER <<<"$output" 2>/dev/null \
+        | sha256sum | awk '{print $1}')" \
+        || { echo "host TLS publication returned no parseable leaf for $name" >&2; return 1; }
+    [[ "$leaf_sha" =~ ^[0-9a-f]{64}$ ]] \
+        || { echo "host TLS publication returned no leaf for $name" >&2; return 1; }
+    printf '%s\n' "$leaf_sha"
+}
+
+load_candidate_controller_descriptor() {
+    local base projection candidate_secret candidate_leaf_sha served_leaf_sha pin_body
+    base="$(docker exec "$CONTAINER" sed -n \
+        's/^DNS_BASE_DOMAIN=//p' /etc/5gpn/dns.env)" \
+        || { echo 'could not read the candidate base domain' >&2; return 1; }
+    [[ "$base" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] \
+        || { echo 'candidate base domain is invalid' >&2; return 1; }
+    CONTROLLER_HOST="console.${base}"
+    CONTROLLER_PORT="$HOST_PORT_443"
+
+    projection="$(inspect_candidate_controller)" \
+        || { echo 'owner-scoped controller inspection failed before authentication' >&2; return 1; }
+    validate_candidate_controller_projection "$projection" \
+        || { echo 'candidate controller projection is invalid before authentication' >&2; return 1; }
+    candidate_secret="$(jq -er .secret <<<"$projection")" \
+        || { echo 'candidate controller secret is missing' >&2; return 1; }
+    [[ "$candidate_secret" != *[[:space:]]* ]] \
+        || { echo 'candidate controller secret is not a bearer token' >&2; return 1; }
+
+    candidate_leaf_sha="$(docker exec "$CONTAINER" openssl x509 \
+        -in /etc/5gpn/cert/console/current/fullchain.pem -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')" \
+        || { echo 'could not identify the candidate controller leaf' >&2; return 1; }
+    [[ "$candidate_leaf_sha" =~ ^[0-9a-f]{64}$ ]] \
+        || { echo 'candidate controller leaf digest is invalid' >&2; return 1; }
+    pin_body="$(docker exec "$CONTAINER" openssl x509 \
+        -in /etc/5gpn/cert/console/current/fullchain.pem -pubkey -noout 2>/dev/null \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | openssl dgst -sha256 -binary \
+        | openssl base64 -A)" \
+        || { echo 'could not identify the candidate controller public key' >&2; return 1; }
+    [[ "$pin_body" =~ ^[A-Za-z0-9+/]{43}=$ ]] \
+        || { echo 'candidate controller public-key pin is invalid' >&2; return 1; }
+
+    served_leaf_sha="$(host_served_leaf_sha256 "$CONTROLLER_PORT" "$CONTROLLER_HOST")" \
+        || return 1
+    [[ "$served_leaf_sha" == "$candidate_leaf_sha" ]] \
+        || { echo 'loopback HTTPS publication does not serve the candidate controller leaf' >&2; return 1; }
+
+    CONTROLLER_SECRET="$candidate_secret"
+    printf 'Authorization: Bearer %s\n' "$CONTROLLER_SECRET" > "$header_file" \
+        || { echo 'could not write the controller authorization header' >&2; return 1; }
+    export FIVEGPN_PROBE_CONTROLLER_HOST="$CONTROLLER_HOST"
+    export FIVEGPN_PROBE_CONTROLLER_PORT="$CONTROLLER_PORT"
+    export FIVEGPN_PROBE_CONTROLLER_PINNED_PUBKEY="sha256//${pin_body}"
+}
+
+assert_candidate_runtime_clean() {
+    docker inspect "$CONTAINER" \
+        | jq -e '
+          .[0].State.Running == true and
+          .[0].State.Pid > 0 and
+          .[0].RestartCount == 0
+        ' >/dev/null
+}
+
+wait_for_candidate_controller_descriptor() {
+    local deadline=$((SECONDS + 90))
+    while ((SECONDS < deadline)); do
+        assert_candidate_runtime_clean \
+            || { echo 'candidate stopped or restarted before its controller descriptor became ready' >&2; return 1; }
+        if load_candidate_controller_descriptor 2>/dev/null; then
+            assert_candidate_runtime_clean \
+                || { echo 'candidate restarted while its controller descriptor became ready' >&2; return 1; }
+            return 0
+        fi
+        sleep 1
+    done
+    load_candidate_controller_descriptor \
+        || { echo 'candidate controller descriptor did not become ready' >&2; return 1; }
+    assert_candidate_runtime_clean \
+        || { echo 'candidate restarted while its controller descriptor became ready' >&2; return 1; }
+}
+
+wait_for_candidate_controller_descriptor
 
 export FIVEGPN_ACCEPTANCE_INTERNAL=5gpn-container-acceptance-v2
 export FIVEGPN_PROBE_CONTAINER="$CONTAINER"
 export FIVEGPN_PROBE_HEADER_FILE="$header_file"
-export FIVEGPN_PROBE_API_ORIGIN="${CAPABILITIES_URL%/capabilities}"
-export FIVEGPN_PROBE_CONTROLLER_HOST="$CONTROLLER_HOST"
-export FIVEGPN_PROBE_CONTROLLER_PORT="$CONTROLLER_PORT"
-export FIVEGPN_PROBE_CONTROLLER_RESOLVE_IP="$CONTROLLER_RESOLVE_IP"
 export FIVEGPN_PROBE_CONTROLLER_CA_FILE="$CONTROLLER_CA_FILE"
 export FIVEGPN_PROBE_SECCOMP_PROFILE="$SECCOMP_PROFILE"
 export FIVEGPN_PROBE_ACCEPTANCE_MODE="$ACCEPTANCE_MODE"
@@ -563,21 +688,9 @@ check_persisted_bootstrap_contract() {
     [[ "$(docker exec "$CONTAINER" /opt/5gpn/bin/5gpn-mihomo \
         5gpn-container-contract)" == 5gpn-container-runtime-v2 ]] \
         || { echo 'live Core does not report container runtime contract v2' >&2; return 1; }
-    projection="$(docker exec "$CONTAINER" /opt/5gpn/bin/5gpn-mihomo \
-        5gpn-config inspect-controller --owner-uid 10001 \
-        --config /etc/5gpn/mihomo/config.yaml)" \
+    projection="$(inspect_candidate_controller)" \
         || { echo 'owner-scoped controller inspection failed in the live image' >&2; return 1; }
-    jq -e '
-      type == "object" and .version == 2 and
-      (.raw_revision | test("^[0-9a-f]{64}$")) and
-      .external_controller_tls == "127.0.0.1:443" and
-      .external_ui == "/opt/5gpn/ui/current" and
-      .certificate == "/etc/5gpn/cert/console/current/fullchain.pem" and
-      .private_key == "/etc/5gpn/cert/console/current/privkey.pem" and
-      (.secret | type == "string" and length >= 16 and length <= 256) and
-      ((keys | sort) == ["certificate","external_controller_tls","external_ui",
-                         "private_key","raw_revision","secret","version"])
-    ' <<<"$projection" >/dev/null \
+    validate_candidate_controller_projection "$projection" \
         || { echo 'live operator config does not match controller inspector v2' >&2; return 1; }
     [[ "$(jq -r .secret <<<"$projection")" == "$CONTROLLER_SECRET" ]] \
         || { echo 'authenticated acceptance secret differs from operator config' >&2; return 1; }
@@ -632,8 +745,9 @@ public_evidence="$(docker exec -i --user 10001:10001 \
     --env FIVEGPN_ACCEPTANCE_INTERNAL=5gpn-container-acceptance-v2 \
     "$CONTAINER" /bin/bash -s < "$PUBLIC_CERT_PROBE")"
 printf '%s\n' "$public_evidence"
-assert_pid1_live
+wait_for_candidate_controller_descriptor
 check_host_publication
+assert_pid1_live
 
 persistent_state_fingerprint() {
     docker exec "$CONTAINER" /bin/bash -euo pipefail -c '
@@ -692,7 +806,6 @@ persistent_state_fingerprint() {
 
 before_state="$(persistent_state_fingerprint)"
 before_id="$(docker inspect --format '{{.Id}}' "$CONTAINER")"
-before_image="$(docker inspect --format '{{.Image}}' "$CONTAINER")"
 before_volume="$(docker inspect "$CONTAINER" | jq -r '
   [.[0].Mounts[] | select(.Destination == "/etc/5gpn" and .Type == "volume")] |
   if length == 1 then .[0].Name else empty end
@@ -717,10 +830,12 @@ docker inspect "$RECREATE_BACKUP" \
     || { echo 'recreate rollback container is missing or still running' >&2; exit 1; }
 CONTAINER="$new_container"
 export FIVEGPN_PROBE_CONTAINER="$CONTAINER"
-wait_for_authenticated_capabilities
 after_id="$(docker inspect --format '{{.Id}}' "$CONTAINER")"
 after_image="$(docker inspect --format '{{.Image}}' "$CONTAINER")"
+wait_for_authenticated_capabilities
 after_image_labels="$(assert_container_boundary)"
+wait_for_candidate_controller_descriptor
+wait_for_authenticated_capabilities
 after_volume="$(docker inspect "$CONTAINER" | jq -r '
   [.[0].Mounts[] | select(.Destination == "/etc/5gpn" and .Type == "volume")] |
   if length == 1 then .[0].Name else empty end
@@ -741,6 +856,7 @@ after_state="$(persistent_state_fingerprint)"
 check_process_boundary
 check_host_publication
 check_persisted_bootstrap_contract
+assert_candidate_runtime_clean
 
 docker rm "$RECREATE_BACKUP" >/dev/null
 RECREATE_BACKUP=''
@@ -754,7 +870,9 @@ RECREATE_ORIGINAL=''
 printf 'acceptance probes sha256: %s\n' "$probe_bundle_sha"
 printf 'accepted commit:          %s\n' "$EXPECTED_COMMIT"
 printf 'accepted image id:        %s\n' "$after_image"
+printf 'accepted candidate:       %s\n' "$candidate_descriptor"
 if [[ "$ACCEPTANCE_MODE" == release ]]; then
+    printf 'accepted release tag:     %s\n' "$EXPECTED_RELEASE_TAG"
     printf 'pinned mihomo sha256:     %s\n' "$EXPECTED_MIHOMO_SHA256"
     echo 'Docker 28 test-env disposable release acceptance: PASS'
 else

@@ -621,6 +621,7 @@ pass "persistent fivegpn processes fail after the bounded wait with diagnostics"
     REPLACED_FIVEGPN_GID=999
     id() { [[ "$1" == -u ]] && printf '1001\n' || printf '1002\n'; }
     managed_roots_have_no_nested_mounts() { return 0; }
+    identity_reconcile_managed_root_is_safe() { return 0; }
     find() { printf '%s\n' "$BASE_DIR/stale-owner"; }
     ! assert_replaced_fivegpn_identity_reconciled >/dev/null 2>&1
 ) || fail "a managed path carrying the replaced IDs was accepted"
@@ -637,6 +638,7 @@ pass "residual replaced numeric ownership blocks startup"
     REPLACED_FIVEGPN_GID=999
     id() { [[ "$1" == -u ]] && printf '1001\n' || printf '1002\n'; }
     managed_roots_have_no_nested_mounts() { return 0; }
+    identity_reconcile_managed_root_is_safe() { return 0; }
     find() { return 0; }
     assert_replaced_fivegpn_identity_reconciled
 ) || fail "fully reconciled managed roots were rejected"
@@ -662,10 +664,146 @@ pass "nested mounts are rejected before recursive identity mutation"
     REPLACED_FIVEGPN_NAMED_GID=""
     id() { [[ "$1" == -u ]] && printf '998\n' || printf '999\n'; }
     managed_roots_have_no_nested_mounts() { return 0; }
+    identity_reconcile_managed_root_is_safe() { return 0; }
     find() { return 1; }
     ! assert_replaced_fivegpn_identity_reconciled >/dev/null 2>&1
 ) || fail "a managed-root scan failure was ignored"
 pass "managed-root scan errors fail identity reconciliation closed"
+
+# Completing reconciliation flushes each distinct managed-root filesystem,
+# scans the old numeric identities again, and only then removes the journal.
+(
+    durable_root="$TMP/durable-completion"
+    BASE_DIR="$durable_root/base"
+    CONF_DIR="$durable_root/conf"
+    STATE_DIR="$durable_root/state"
+    INTERCEPT_STATE_DIR="$durable_root/intercept"
+    INTERCEPT_CA_DIR="$durable_root/ca"
+    IDENTITY_RECONCILE_FILE="$STATE_DIR/identity-reconcile"
+    mkdir -p "$BASE_DIR" "$CONF_DIR" "$STATE_DIR" "$INTERCEPT_STATE_DIR" "$INTERCEPT_CA_DIR"
+    printf 'pending\n' > "$IDENTITY_RECONCILE_FILE"
+    IDENTITY_RECONCILE_LOADED=1
+    REPLACED_FIVEGPN_UID=901
+    REPLACED_FIVEGPN_GID=902
+    REPLACED_FIVEGPN_NAMED_GID=902
+    calls="$durable_root/calls"
+    : > "$calls"
+    identity_reconcile_journal_file_is_safe() { return 0; }
+    managed_roots_have_no_nested_mounts() { return 0; }
+    identity_reconcile_managed_root_is_safe() { return 0; }
+    stat() {
+        local path="${@: -1}"
+        printf 'stat:%s\n' "$path" >> "$calls"
+        case "$path" in
+            "$BASE_DIR"|"$CONF_DIR"|"$INTERCEPT_CA_DIR") printf '41\n' ;;
+            "$STATE_DIR"|"$INTERCEPT_STATE_DIR") printf '42\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    sync() {
+        [[ "$1" == -f && "$#" == 2 ]] || return 1
+        printf 'sync:%s\n' "$2" >> "$calls"
+    }
+    id() {
+        case "$1" in
+            -u) printf '1001\n' ;;
+            -g) printf '1002\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    find() {
+        printf 'scan:%s:%s:%s\n' "$1" "$2" "$3" >> "$calls"
+        return 0
+    }
+    publish_identity_reconcile_journal() {
+        [[ "$1:$2:$3" == -:-:- ]] || return 1
+        printf 'delete:%s\n' "$IDENTITY_RECONCILE_FILE" >> "$calls"
+        command rm -f -- "$IDENTITY_RECONCILE_FILE"
+    }
+
+    complete_replaced_fivegpn_identity_reconciliation
+    [[ ! -e "$IDENTITY_RECONCILE_FILE" ]]
+    [[ "$(grep -c '^stat:' "$calls")" == 5 ]]
+    [[ "$(grep -c '^sync:' "$calls")" == 2 ]]
+    grep -Fxq "sync:$BASE_DIR" "$calls"
+    grep -Fxq "sync:$STATE_DIR" "$calls"
+    last_stat_line="$(grep -n '^stat:' "$calls" | tail -1 | cut -d: -f1)"
+    last_sync_line="$(grep -n '^sync:' "$calls" | tail -1 | cut -d: -f1)"
+    first_scan_line="$(grep -n '^scan:' "$calls" | head -1 | cut -d: -f1)"
+    last_scan_line="$(grep -n '^scan:' "$calls" | tail -1 | cut -d: -f1)"
+    delete_line="$(grep -n '^delete:' "$calls" | cut -d: -f1)"
+    [[ "$last_stat_line" -lt "$first_scan_line" \
+       && "$last_sync_line" -lt "$first_scan_line" \
+       && "$last_scan_line" -lt "$delete_line" ]]
+) || fail "identity completion did not flush distinct devices before its final scan and journal deletion"
+pass "identity completion flushes each managed-root device before rescanning and deleting the journal"
+
+for completion_failure in unsafe_path stat invalid_device sync scan; do
+    (
+        failure_root="$TMP/durable-failure-$completion_failure"
+        BASE_DIR="$failure_root/base"
+        CONF_DIR="$failure_root/conf"
+        STATE_DIR="$failure_root/state"
+        INTERCEPT_STATE_DIR="$failure_root/intercept"
+        INTERCEPT_CA_DIR="$failure_root/ca"
+        IDENTITY_RECONCILE_FILE="$STATE_DIR/identity-reconcile"
+        mkdir -p "$BASE_DIR" "$CONF_DIR" "$STATE_DIR" "$INTERCEPT_STATE_DIR" "$INTERCEPT_CA_DIR"
+        printf 'pending\n' > "$IDENTITY_RECONCILE_FILE"
+        IDENTITY_RECONCILE_LOADED=1
+        REPLACED_FIVEGPN_UID=901
+        REPLACED_FIVEGPN_GID=902
+        REPLACED_FIVEGPN_NAMED_GID=902
+        calls="$failure_root/calls"
+        : > "$calls"
+        identity_reconcile_journal_file_is_safe() { return 0; }
+        managed_roots_have_no_nested_mounts() { return 0; }
+        identity_reconcile_managed_root_is_safe() {
+            [[ "$completion_failure" != unsafe_path || "$1" != "$CONF_DIR" ]]
+        }
+        stat() {
+            local path="${@: -1}"
+            printf 'stat:%s\n' "$path" >> "$calls"
+            if [[ "$path" == "$CONF_DIR" ]]; then
+                [[ "$completion_failure" != stat ]] || return 1
+                if [[ "$completion_failure" == invalid_device ]]; then
+                    printf 'invalid\n'
+                    return 0
+                fi
+            fi
+            case "$path" in
+                "$BASE_DIR") printf '51\n' ;;
+                "$CONF_DIR") printf '52\n' ;;
+                "$STATE_DIR") printf '53\n' ;;
+                "$INTERCEPT_STATE_DIR") printf '54\n' ;;
+                "$INTERCEPT_CA_DIR") printf '55\n' ;;
+                *) return 1 ;;
+            esac
+        }
+        sync() {
+            [[ "$1" == -f && "$#" == 2 ]] || return 1
+            printf 'sync:%s\n' "$2" >> "$calls"
+            [[ "$completion_failure" != sync || "$2" != "$CONF_DIR" ]]
+        }
+        assert_replaced_fivegpn_identity_reconciled() {
+            printf 'scan\n' >> "$calls"
+            [[ "$completion_failure" != scan ]]
+        }
+        publish_identity_reconcile_journal() {
+            printf 'delete\n' >> "$calls"
+            command rm -f -- "$IDENTITY_RECONCILE_FILE"
+        }
+
+        ! complete_replaced_fivegpn_identity_reconciliation >/dev/null 2>&1
+        [[ -f "$IDENTITY_RECONCILE_FILE" ]]
+        ! grep -Fxq delete "$calls"
+        if [[ "$completion_failure" == scan ]]; then
+            grep -Fxq scan "$calls"
+        else
+            ! grep -Fxq scan "$calls"
+        fi
+    ) || fail "$completion_failure failure did not retain the identity reconciliation journal"
+done
+pass "unsafe roots and stat, sync, or rescan failures retain the identity reconciliation journal"
 
 # CA publication recovery distinguishes an incomplete live trust root from an
 # unpublished candidate. It never replaces bytes already visible to clients.
@@ -692,6 +830,135 @@ pass "an incomplete live interception CA fails closed without changing trust-roo
     [[ ! -e "$INTERCEPT_CA_DIR/.root.crt.new" ]]
 ) || fail "candidate-only interception CA partial was not safely discarded"
 pass "candidate-only interception CA partials are recoverable"
+
+(
+    INTERCEPT_CA_DIR="$TMP/ca-file-sync-failure"
+    mkdir -p "$INTERCEPT_CA_DIR"
+    printf 'candidate-certificate\n' > "$INTERCEPT_CA_DIR/.root.crt.new"
+    printf 'candidate-key\n' > "$INTERCEPT_CA_DIR/.root.key.new"
+    validate_intercept_ca_pair() { return 0; }
+    sync() { [[ "$*" != "-f $INTERCEPT_CA_DIR/.root.key.new" ]]; }
+    ! commit_intercept_ca_publication \
+        "$INTERCEPT_CA_DIR/.root.crt.new" "$INTERCEPT_CA_DIR/.root.key.new" \
+        >/dev/null 2>&1
+    [[ -f "$INTERCEPT_CA_DIR/.root.crt.new" \
+       && -f "$INTERCEPT_CA_DIR/.root.key.new" \
+       && ! -e "$INTERCEPT_CA_DIR/root.crt" \
+       && ! -e "$INTERCEPT_CA_DIR/root.key" ]]
+) || fail "an interception CA candidate file sync failure reached the live namespace"
+pass "interception CA candidate file sync failure leaves only recoverable candidates"
+
+(
+    INTERCEPT_CA_DIR="$TMP/ca-candidate-directory-sync-failure"
+    mkdir -p "$INTERCEPT_CA_DIR"
+    printf 'candidate-certificate\n' > "$INTERCEPT_CA_DIR/.root.crt.new"
+    printf 'candidate-key\n' > "$INTERCEPT_CA_DIR/.root.key.new"
+    validate_intercept_ca_pair() { return 0; }
+    sync() { [[ "$*" != "-f $INTERCEPT_CA_DIR" ]]; }
+    ! commit_intercept_ca_publication \
+        "$INTERCEPT_CA_DIR/.root.crt.new" "$INTERCEPT_CA_DIR/.root.key.new" \
+        >/dev/null 2>&1
+    [[ -f "$INTERCEPT_CA_DIR/.root.crt.new" \
+       && -f "$INTERCEPT_CA_DIR/.root.key.new" \
+       && ! -e "$INTERCEPT_CA_DIR/root.crt" \
+       && ! -e "$INTERCEPT_CA_DIR/root.key" ]]
+) || fail "an interception CA candidate directory sync failure reached the live namespace"
+pass "candidate directory sync failure prevents interception CA publication"
+
+(
+    INTERCEPT_CA_DIR="$TMP/ca-live-directory-sync-failure"
+    mkdir -p "$INTERCEPT_CA_DIR"
+    printf 'candidate-certificate\n' > "$INTERCEPT_CA_DIR/.root.crt.new"
+    printf 'candidate-key\n' > "$INTERCEPT_CA_DIR/.root.key.new"
+    root_plain_file_metadata_is_safe() { return 0; }
+    validate_intercept_ca_pair() { return 0; }
+    directory_syncs=0
+    sync() {
+        if [[ "$*" == "-f $INTERCEPT_CA_DIR" ]]; then
+            directory_syncs=$((directory_syncs + 1))
+            [[ "$directory_syncs" == 1 ]]
+            return
+        fi
+        return 0
+    }
+    ! commit_intercept_ca_publication \
+        "$INTERCEPT_CA_DIR/.root.crt.new" "$INTERCEPT_CA_DIR/.root.key.new" \
+        >/dev/null 2>&1
+    [[ -f "$INTERCEPT_CA_DIR/root.crt" && -f "$INTERCEPT_CA_DIR/root.key" ]]
+    cp "$INTERCEPT_CA_DIR/root.crt" "$TMP/ca-live-directory-sync-failure.crt"
+    cp "$INTERCEPT_CA_DIR/root.key" "$TMP/ca-live-directory-sync-failure.key"
+    sync() { return 0; }
+    recover_intercept_ca_publication
+    cmp -s "$TMP/ca-live-directory-sync-failure.crt" "$INTERCEPT_CA_DIR/root.crt"
+    cmp -s "$TMP/ca-live-directory-sync-failure.key" "$INTERCEPT_CA_DIR/root.key"
+) || fail "an undurable live interception CA pair could not be confirmed without replacement"
+pass "post-rename directory sync failure fails closed and recovers forward"
+
+(
+    INTERCEPT_CA_DIR="$TMP/ca-recovery-directory-sync-failure"
+    mkdir -p "$INTERCEPT_CA_DIR"
+    printf 'published-certificate\n' > "$INTERCEPT_CA_DIR/root.crt"
+    printf 'published-key\n' > "$INTERCEPT_CA_DIR/root.key"
+    cp "$INTERCEPT_CA_DIR/root.crt" "$TMP/ca-recovery-directory-sync-failure.crt"
+    cp "$INTERCEPT_CA_DIR/root.key" "$TMP/ca-recovery-directory-sync-failure.key"
+    root_plain_file_metadata_is_safe() { return 0; }
+    validate_intercept_ca_pair() { return 0; }
+    sync() { [[ "$*" != "-f $INTERCEPT_CA_DIR" ]]; }
+    ! recover_intercept_ca_publication >/dev/null 2>&1
+    cmp -s "$TMP/ca-recovery-directory-sync-failure.crt" "$INTERCEPT_CA_DIR/root.crt"
+    cmp -s "$TMP/ca-recovery-directory-sync-failure.key" "$INTERCEPT_CA_DIR/root.key"
+) || fail "interception CA recovery ignored a directory sync failure"
+pass "interception CA recovery fails closed when live directory sync is unconfirmed"
+
+(
+    INTERCEPT_CA_DIR="$TMP/ca-complete-candidate"
+    mkdir -p "$INTERCEPT_CA_DIR"
+    printf 'candidate-certificate\n' > "$INTERCEPT_CA_DIR/.root.crt.new"
+    printf 'candidate-key\n' > "$INTERCEPT_CA_DIR/.root.key.new"
+    root_plain_file_metadata_is_safe() { return 0; }
+    validate_intercept_ca_pair() { return 0; }
+    sync() { return 0; }
+    recover_intercept_ca_publication
+    [[ -f "$INTERCEPT_CA_DIR/root.crt" && -f "$INTERCEPT_CA_DIR/root.key" \
+       && ! -e "$INTERCEPT_CA_DIR/.root.crt.new" \
+       && ! -e "$INTERCEPT_CA_DIR/.root.key.new" ]]
+) || fail "a complete durable interception CA candidate pair was not recoverable"
+pass "complete candidate-only interception CA publication recovers forward"
+
+(
+    INTERCEPT_CA_DIR="$TMP/ca-live-key-partial"
+    mkdir -p "$INTERCEPT_CA_DIR"
+    printf 'candidate-certificate\n' > "$INTERCEPT_CA_DIR/.root.crt.new"
+    printf 'candidate-key\n' > "$INTERCEPT_CA_DIR/root.key"
+    cp "$INTERCEPT_CA_DIR/root.key" "$TMP/ca-live-key-partial.before"
+    root_plain_file_metadata_is_safe() { return 0; }
+    validate_intercept_ca_pair() { return 0; }
+    sync() { return 0; }
+    recover_intercept_ca_publication
+    cmp -s "$TMP/ca-live-key-partial.before" "$INTERCEPT_CA_DIR/root.key"
+    [[ -f "$INTERCEPT_CA_DIR/root.crt" && ! -e "$INTERCEPT_CA_DIR/.root.crt.new" ]]
+) || fail "a matching key-first interception CA partial was not recovered forward"
+pass "key-first live interception CA partial preserves its key and publishes its matching certificate"
+
+(
+    INTERCEPT_CA_DIR="$TMP/ca-existing-live-pair"
+    mkdir -p "$INTERCEPT_CA_DIR"
+    printf 'published-certificate\n' > "$INTERCEPT_CA_DIR/root.crt"
+    printf 'published-key\n' > "$INTERCEPT_CA_DIR/root.key"
+    printf 'different-candidate-certificate\n' > "$INTERCEPT_CA_DIR/.root.crt.new"
+    printf 'different-candidate-key\n' > "$INTERCEPT_CA_DIR/.root.key.new"
+    cp "$INTERCEPT_CA_DIR/root.crt" "$TMP/ca-existing-live-pair.crt"
+    cp "$INTERCEPT_CA_DIR/root.key" "$TMP/ca-existing-live-pair.key"
+    root_plain_file_metadata_is_safe() { return 0; }
+    validate_intercept_ca_pair() { return 0; }
+    sync() { return 0; }
+    recover_intercept_ca_publication
+    cmp -s "$TMP/ca-existing-live-pair.crt" "$INTERCEPT_CA_DIR/root.crt"
+    cmp -s "$TMP/ca-existing-live-pair.key" "$INTERCEPT_CA_DIR/root.key"
+    [[ ! -e "$INTERCEPT_CA_DIR/.root.crt.new" \
+       && ! -e "$INTERCEPT_CA_DIR/.root.key.new" ]]
+) || fail "a valid published interception CA was replaced by candidate bytes"
+pass "valid published interception CA bytes always win over leftover candidates"
 
 for partial_shape in user_only group_only; do
     (
@@ -899,6 +1166,7 @@ pass "journal recovery refuses missing provenance and reused numeric identities"
     INTERCEPT_CA_DIR="$TMP/resume/ca"
     mkdir -p "$BASE_DIR" "$CONF_DIR" "$INTERCEPT_STATE_DIR" "$INTERCEPT_CA_DIR"
     managed_roots_have_no_nested_mounts() { return 0; }
+    identity_reconcile_managed_root_is_safe() { return 0; }
     id() {
         case "$1" in
             -u) printf '998\n' ;;

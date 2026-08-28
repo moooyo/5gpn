@@ -449,11 +449,12 @@ a value a maintainer had pasted back in, which anyone bypassing the gate could
 satisfy in one paste. Publication is instead bound to what the release job
 itself builds and pushes, which no one can forge by hand. Acceptance is a
 maintainer's obligation before tagging, not a machine check afterwards.
-The pinned pair already implements container-runtime-v2 and carries the
-deployment-neutral Console wording, so the pins are no longer the blocker. The
-surviving blocker is that no exact image has passed release-mode acceptance and
-the three variables are unset; do not weaken the handshake or describe an
-unaccepted image as a publishable Docker release.
+The pinned pair for each candidate must implement container-runtime-v2 and carry
+the deployment-neutral Console wording. Whether that candidate passed
+release-mode acceptance is established only by evidence bound to its exact
+commit, tag, pin manifest, image ID, and probe bundle; neither an earlier run nor
+a mutable status note carries forward. Do not weaken the handshake or describe
+an unaccepted candidate as a publishable Docker release.
 
 Preserve unrelated dirty-worktree changes. Use `rg` for discovery and
 `apply_patch` for edits. Until a release policy says otherwise, change stale

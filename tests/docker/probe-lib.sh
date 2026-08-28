@@ -12,6 +12,12 @@ probe_die() {
     exit 1
 }
 
+[[ "${FIVEGPN_PROBE_CONTROLLER_HOST:-}" =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ \
+   && "${FIVEGPN_PROBE_CONTROLLER_PORT:-}" =~ ^[1-9][0-9]{0,4}$ \
+   && "${FIVEGPN_PROBE_CONTROLLER_PORT}" -le 65535 \
+   && "${FIVEGPN_PROBE_CONTROLLER_PINNED_PUBKEY:-}" =~ ^sha256//[A-Za-z0-9+/]{43}=$ ]] \
+    || probe_die 'candidate-derived controller descriptor is invalid'
+
 require_probe_command() {
     command -v "$1" >/dev/null 2>&1 \
         || probe_die "missing test-env command: $1"
@@ -35,15 +41,28 @@ container_pid() {
     printf '%s\n' "$pid"
 }
 
+assert_probe_candidate_runtime_clean() {
+    docker inspect "$FIVEGPN_PROBE_CONTAINER" \
+        | jq -e '
+          .[0].State.Running == true and
+          .[0].State.Pid > 0 and
+          .[0].RestartCount == 0
+        ' >/dev/null
+}
+
 api_request() {
     local method="$1" path="$2" data="${3-}"
     local -a args=(
+        --disable
         --fail
         --silent
         --show-error
         --noproxy '*'
+        --proto '=https'
         --max-time 60
         --request "$method"
+        --resolve "${FIVEGPN_PROBE_CONTROLLER_HOST}:${FIVEGPN_PROBE_CONTROLLER_PORT}:127.0.0.1"
+        --pinnedpubkey "$FIVEGPN_PROBE_CONTROLLER_PINNED_PUBKEY"
         --header "@$FIVEGPN_PROBE_HEADER_FILE"
         --header 'Content-Type: application/json'
     )
@@ -52,11 +71,9 @@ api_request() {
     if [[ -n "${FIVEGPN_PROBE_CONTROLLER_CA_FILE:-}" ]]; then
         args+=(--cacert "$FIVEGPN_PROBE_CONTROLLER_CA_FILE")
     fi
-    if [[ -n "${FIVEGPN_PROBE_CONTROLLER_RESOLVE_IP:-}" ]]; then
-        args+=(--resolve "${FIVEGPN_PROBE_CONTROLLER_HOST}:${FIVEGPN_PROBE_CONTROLLER_PORT}:${FIVEGPN_PROBE_CONTROLLER_RESOLVE_IP}")
-    fi
     [[ $# -lt 3 ]] || args+=(--data-binary "$data")
-    curl "${args[@]}" "${FIVEGPN_PROBE_API_ORIGIN}${path}"
+    curl "${args[@]}" \
+        "https://${FIVEGPN_PROBE_CONTROLLER_HOST}:${FIVEGPN_PROBE_CONTROLLER_PORT}${path}"
 }
 
 wait_for_authenticated_capabilities() {
@@ -68,6 +85,8 @@ wait_for_authenticated_capabilities() {
                 .features["5gpn-dns"].version == 2 and
                 .features["5gpn-interception"].version == 8
               ' <<<"$payload" >/dev/null; then
+            assert_probe_candidate_runtime_clean \
+                || probe_die 'candidate restarted before authenticated capabilities became ready'
             return 0
         fi
         sleep 1

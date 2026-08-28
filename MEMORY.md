@@ -69,10 +69,7 @@ Update the status and the normative documentation when an implementation lands.
 
 ## Simplified Docker delivery
 
-**Status: Implemented on the merged root maintenance line; the container-capable
-Core and Console pair is published and pinned. Release-mode acceptance first
-passed on 2026-08-22. Nothing is published to GHCR yet.
-Recorded 2026-08-09, updated 2026-08-22.**
+**Status: Implemented. Recorded 2026-08-09, updated 2026-08-28.**
 
 - Docker is a packaging and process-lifecycle variant, not a second runtime
   architecture. One `linux/amd64` image runs as one container and one Compose
@@ -144,8 +141,8 @@ Recorded 2026-08-09, updated 2026-08-22.**
   never moves it. This ordering makes a partial publication resumable without
   letting `latest` name an unpublished release.
 - Hosted CI can prove pin verification, image construction, and static smoke
-  only. It must not present those checks as cgroup validation. The release
-  readiness gate is a real Docker 28/cgroup-v2 run on a disposable target
+  only. It must not present those checks as cgroup validation. Release readiness
+  requires a real Docker 28/cgroup-v2 run on a disposable target
   reached through `test-env`, covering the startup probe, extension execution
   and OOM containment, certificate hot publication, recreate, and volume
   persistence. The working gateway's read-only deployment authorization does
@@ -161,14 +158,11 @@ Recorded 2026-08-09, updated 2026-08-22.**
   driver, and probe input is tracked and unchanged at that commit. A copied or
   locally weakened harness cannot emit release evidence by repeating the
   expected commit string.
-- The older branch passed development-mode acceptance before the current-schema
-  installer, container-runtime-v2 contract, centralized pin manifest, durable
-  UI volume, and acceptance-safety changes landed. That evidence is historical
-  and cannot authorize publication of the merged result. The container-capable
-  pair is now recorded in `release/pins.env` — the pinned Core answers the
-  runtime-v2 handshake and the pinned Console carries the
-  deployment-neutral wording. The merged image passed fresh release-mode
-  acceptance on 2026-08-22; publication to GHCR has still not happened.
+- Historical acceptance never carries forward. Every release-mode run belongs
+  only to its exact root commit, tag, pin manifest, image ID, and probe bundle;
+  it proves nothing about a later candidate or pinned pair. Release and registry
+  availability are live external facts and are read from immutable GitHub
+  Release records rather than maintained as status in this decision log.
 
 ## Cross-repository development baselines
 
@@ -245,6 +239,12 @@ Recorded 2026-08-09, updated 2026-08-22.**
 - A generic `mihomo` user or group and every retired unit definition are hard
   pre-publication conflicts regardless of whether their bytes carry a 5gpn
   marker. Detection is read-only; the installer does not stop or adopt them.
+- Full install collects a missing Cloudflare token only after the complete
+  candidate and operator YAML agree, retains it only in process memory through
+  dependency installation and the final locked certificate-source recheck,
+  and persists it only after publication starts and the fixed project roots are
+  claimed. A pre-publication failure cannot leave a credential behind while
+  claiming that no 5gpn publication ran.
 - Installed `configure` is a narrow current-schema transaction rather than a
   reinstall. It requires the current owned environment, operator YAML, DNS
   document, installed Core, identity, unit, and filesystem boundaries. It does
@@ -314,6 +314,9 @@ Recorded 2026-08-09, updated 2026-08-22.**
   that no other identity claimed them; an exact surviving `fivegpn` group may
   retain its recorded GID. The journal alone authorizes nothing. A same-named
   identity without current provenance is foreign and is rejected unchanged.
+  Completion flushes each distinct filesystem containing a validated managed
+  root, rescans for every replaced UID/GID, and only then removes the journal;
+  any path, stat, sync, or rescan failure retains it.
 - The only current public certificate roles are `dot` and `console`. A `web`
   role is an unsupported legacy footprint. The public Console and both signed
   iOS profiles are one atomic generation selected by the relative
@@ -336,6 +339,12 @@ Recorded 2026-08-09, updated 2026-08-22.**
   lock. Configure cannot create a gate across that assertion because it also
   needs the certificate lock. A
   flat `/opt/5gpn/ui` tree and `/opt/5gpn/www` are unsupported.
+- UI generation GC first rechecks the current and previous protection set,
+  renames an unreferenced complete generation to a same-directory
+  `.delete.<pid>.<random>` tombstone, and syncs the rename. It removes only
+  revalidated plain entries, makes content removal durable before deleting the
+  ownership marker, and resumes only strictly valid partial or empty
+  tombstones. A GC interruption never leaves a half-deleted formal generation.
 - Public certificate role validation, staging, pointer commit, and protected
   cleanup have one installed implementation. `cert-role-ctl.sh` consumes the
   shared `publication-fs.sh` mount and durability primitives; the installer,
@@ -355,6 +364,12 @@ Recorded 2026-08-09, updated 2026-08-22.**
   the live certificate, key, production server, authenticator, credential, and
   live/archive paths all match the requested mode. Source, base, mode, or
   ownership mismatches cannot authorize reuse.
+- Provenance replacement fsyncs both its candidate and containing directory.
+  A post-rename sync failure is a visible `committed-undurable` state and does
+  not permit configure to restore a quiesced runtime. During a base switch,
+  timer takeover accepts only the selected candidate plus canonical lineages
+  named by one stable `.certbot-ownership` snapshot; older owned lineages stay
+  dormant because the scoped timer renews only the current `dns.env` base.
 - An external canonical lineage is always read-only and non-owning. Strict
   current certificate and renewal fingerprints may select it, including after
   debug when no ownership record names that exact base; retained ownership of a
@@ -519,6 +534,11 @@ marketplace and review contract 8 on 2026-08-25.**
   client may retry over TCP and enter capture; an H3-only client fails. The
   guard does not disable ordinary UDP or QUIC sniffing on other configured
   ports.
+- A fresh host interception CA is distributable only after its candidate key
+  and certificate, candidate directory entries, key-first live promotion, and
+  final live directory entry are durable. Recovery preserves any complete
+  valid live root and can finish only a matching candidate or half-published
+  pair; unrelated candidate bytes never replace a visible trust root.
 - Every installed extension has an operator-owned `capture_dns` binding with
   the exact values `trust` and `china`; imported extensions default to `trust`.
   The binding is mutable state outside the immutable snapshot digest and is

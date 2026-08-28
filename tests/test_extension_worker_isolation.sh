@@ -97,15 +97,18 @@ for unit in 5gpn-mihomo.service 5gpn-intercept-cert.service \
 done
 [[ "$(grep -Ec '^[[:space:]]+5gpn-.*\.(service|path|timer)$' <<<"$managed_units_decl")" == 6 ]] \
     || fail "candidate verification manifest does not contain exactly six units"
-for pattern in \
-    'OOMPolicy|Delegate*|Slice|DisableControllers' \
-    'Memory*|StartupMemory*|AllowedMemoryNodes|StartupAllowedMemoryNodes' \
-    'CPU*|StartupCPU*|AllowedCPUs|StartupAllowedCPUs' \
-    'IO*|StartupIO*|BlockIO*|StartupBlockIO*|Tasks*|ManagedOOM*' \
-    'Limit*|Nice|OOMScoreAdjust|TimerSlackNSec|NUMA*'; do
-    grep -Fq "$pattern" "$INSTALL" \
-        || fail "global resource override gate omits: $pattern"
+global_dropin_fn="$(sed -n '/^systemd_global_dropin_has_managed_override()/,/^}/p' "$INSTALL")"
+grep -Fq 'systemd_global_dropin_key_is_managed' "$INSTALL" \
+    && fail "global resource override gate returned to an incomplete directive denylist"
+for section in \
+    "service:'[Service]'" "service:'[Unit]'" "service:'[Install]'" \
+    "path:'[Path]'" "path:'[Unit]'" "path:'[Install]'" \
+    "timer:'[Timer]'" "timer:'[Unit]'" "timer:'[Install]'"; do
+    grep -Fq "$section" <<<"$global_dropin_fn" \
+        || fail "global override gate omits applicable section: $section"
 done
+grep -Fq '[[ "$line" == *=* ]] && return 0' <<<"$global_dropin_fn" \
+    || fail "global override gate does not reject every applicable assignment"
 for legacy_key in MemoryLimit CPUShares StartupCPUShares BlockIOWeight \
                   StartupBlockIOWeight BlockIODeviceWeight \
                   BlockIOReadBandwidth BlockIOWriteBandwidth; do

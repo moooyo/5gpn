@@ -316,6 +316,297 @@ eval "$original_gc_function"
     || fail "GC failure did not preserve the committed current with a warning"
 pass "post-commit GC failure is warning-only after a durable current switch"
 
+rename_sync_candidate="$(ui_generation_clone_current "$ui_root")" \
+    || fail "could not prepare generation-rename sync failure candidate"
+complete_candidate_profiles "$rename_sync_candidate" rename-sync
+rename_sync_previous="$(readlink -- "$ui_root/current")"
+[[ -z "$(find "$ui_root/generations" -mindepth 1 -maxdepth 1 \
+    -type d -name '.delete.*' -print -quit)" ]] \
+    || fail "rename-sync fixture started with stale delete residue"
+RENAME_SYNC_REAL="$(command -v sync)"
+FAIL_RENAME_SYNC=1
+sync() {
+    if [[ "$FAIL_RENAME_SYNC" == 1 && "$*" == "-f $ui_root/generations" \
+       && -n "$(find "$ui_root/generations" -mindepth 1 -maxdepth 1 \
+                    -type d -name '.delete.*' -print -quit)" ]]; then
+        FAIL_RENAME_SYNC=0
+        return 1
+    fi
+    "$RENAME_SYNC_REAL" "$@"
+}
+ui_generation_publish "$ui_root" "$rename_sync_candidate" \
+    || fail "generation-rename sync failure incorrectly failed publication"
+unset -f sync
+rename_sync_current="$(readlink -- "$ui_root/current")"
+rename_sync_tombstone="$(find "$ui_root/generations" -mindepth 1 -maxdepth 1 \
+    -type d -name '.delete.*' -print -quit)"
+[[ "$FAIL_RENAME_SYNC" == 0 \
+   && "$UI_GENERATION_COMMIT_STATE" == committed \
+   && "$UI_GENERATION_GC_WARNING" == 1 \
+   && "$rename_sync_current" != "$rename_sync_previous" \
+   && -d "$ui_root/$rename_sync_current" \
+   && -d "$ui_root/$rename_sync_previous" \
+   && -n "$rename_sync_tombstone" ]] \
+    || fail "failed generation-rename sync lost a protected generation or tombstone"
+_ui_generation_complete_is_safe "$ui_root" "$rename_sync_tombstone" \
+    || fail "failed generation-rename sync did not retain the complete renamed generation"
+ui_generation_prepare_existing_current "$ui_root" \
+    || fail "startup preparation could not recover a rename-sync tombstone"
+[[ ! -e "$rename_sync_tombstone" && ! -L "$rename_sync_tombstone" ]] \
+    || fail "rename-sync tombstone remained after startup recovery"
+pass "formal generation rename is fenced durably before tombstone deletion"
+
+tombstone_candidate="$(ui_generation_clone_current "$ui_root")" \
+    || fail "could not prepare interrupted tombstone GC candidate"
+complete_candidate_profiles "$tombstone_candidate" tombstone
+tombstone_previous="$(readlink -- "$ui_root/current")"
+[[ -z "$(find "$ui_root/generations" -mindepth 1 -maxdepth 1 \
+    -type d -name '.delete.*' -print -quit)" ]] \
+    || fail "tombstone interruption fixture started with stale delete residue"
+original_tombstone_remove="$(declare -f _ui_generation_remove_tombstone_exact)"
+interrupted_tombstone=""
+tombstone_remove_calls=0
+_ui_generation_remove_tombstone_exact() {
+    local root="$1" tombstone="$2"
+    tombstone_remove_calls=$((tombstone_remove_calls + 1))
+    interrupted_tombstone="$tombstone"
+    _ui_generation_tombstone_is_safe "$root" "$tombstone" || return 1
+    rm -f -- "$tombstone/index.html" || return 1
+    sync -f "$tombstone" || return 1
+    return 1
+}
+ui_generation_publish "$ui_root" "$tombstone_candidate" \
+    || fail "interrupted tombstone cleanup incorrectly failed publication"
+eval "$original_tombstone_remove"
+tombstone_current="$(readlink -- "$ui_root/current")"
+tombstone_residue="$(find "$ui_root/generations" -mindepth 1 -maxdepth 1 \
+    -type d -name '.delete.*' -print -quit)"
+[[ "$UI_GENERATION_COMMIT_STATE" == committed && "$UI_GENERATION_GC_WARNING" == 1 \
+   && "$tombstone_current" != "$tombstone_previous" \
+   && -d "$ui_root/$tombstone_current" \
+   && -d "$ui_root/$tombstone_previous" \
+   && -n "$tombstone_residue" \
+   && "$tombstone_remove_calls" == 1 \
+   && "$tombstone_residue" == "$interrupted_tombstone" \
+   && ! -e "$tombstone_residue/index.html" \
+   && -f "$tombstone_residue/$UI_GENERATION_ENTRY_MARKER" ]] \
+    || fail "interrupted GC did not retain current, previous, and an owned partial tombstone"
+_ui_generation_tombstone_is_safe "$ui_root" "$tombstone_residue" \
+    || fail "partial tombstone was not a strictly recoverable generation residue"
+ln -s -- "$tombstone_current" "$ui_root/.current.new.777.777"
+ui_generation_preflight "$ui_root" \
+    || fail "write preflight rejected safe link and tombstone residues"
+ui_generation_prepare_existing_current "$ui_root" \
+    || fail "startup preparation could not order link and tombstone cleanup"
+[[ ! -e "$tombstone_residue" && ! -L "$tombstone_residue" \
+   && ! -e "$ui_root/.current.new.777.777" \
+   && ! -L "$ui_root/.current.new.777.777" ]] \
+    || fail "startup preparation left an interrupted residue behind"
+protected_previous_before="$(tree_fingerprint "$ui_root/$tombstone_previous")" \
+    || fail "could not fingerprint the protected previous generation"
+if _ui_generation_remove_generation "$ui_root" "$ui_root/$tombstone_previous" \
+        "$tombstone_current" "$tombstone_previous" >/dev/null 2>&1; then
+    fail "formal GC removed the retained previous generation"
+fi
+protected_previous_after="$(tree_fingerprint "$ui_root/$tombstone_previous")" \
+    || fail "protected previous generation disappeared after GC rejection"
+[[ "$protected_previous_after" == "$protected_previous_before" ]] \
+    || fail "previous-generation protection rejection changed its tree"
+pass "formal generation GC renames durably and resumes an interrupted tombstone"
+
+foreign_tombstone="$ui_root/generations/.delete.999999.999999"
+mkdir "$foreign_tombstone"
+chmod 0755 "$foreign_tombstone"
+printf 'not tool owned\n' > "$foreign_tombstone/unowned.txt"
+chmod 0644 "$foreign_tombstone/unowned.txt"
+if ui_generation_preflight "$ui_root" >/dev/null 2>&1; then
+    fail "markerless nonempty tombstone lookalike was accepted"
+fi
+if ui_generation_cleanup_tombstones "$ui_root" >/dev/null 2>&1; then
+    fail "markerless nonempty tombstone lookalike was cleaned"
+fi
+grep -Fxq 'not tool owned' "$foreign_tombstone/unowned.txt" \
+    || fail "unsafe tombstone rejection changed external-looking bytes"
+rm -rf -- "$foreign_tombstone"
+
+outside_tombstone="$TMP/.delete.555555.555555"
+cp -a -- "$ui_root/$tombstone_current" "$outside_tombstone"
+outside_tombstone_before="$(tree_fingerprint "$outside_tombstone")" \
+    || fail "could not fingerprint out-of-scope tombstone lookalike"
+if _ui_generation_remove_tombstone_exact "$ui_root" "$outside_tombstone" \
+        >/dev/null 2>&1; then
+    fail "out-of-scope tombstone lookalike was cleaned"
+fi
+outside_tombstone_after="$(tree_fingerprint "$outside_tombstone")" \
+    || fail "out-of-scope tombstone lookalike disappeared after rejection"
+[[ "$outside_tombstone_after" == "$outside_tombstone_before" ]] \
+    || fail "out-of-scope tombstone rejection changed its tree"
+rm -rf -- "$outside_tombstone"
+
+metadata_tombstone="$ui_root/generations/.delete.444444.444444"
+cp -a -- "$ui_root/$tombstone_current" "$metadata_tombstone"
+chmod 0664 "$metadata_tombstone/index.html"
+metadata_tombstone_before="$(tree_fingerprint "$metadata_tombstone")" \
+    || fail "could not fingerprint unsafe-metadata tombstone"
+if ui_generation_preflight "$ui_root" >/dev/null 2>&1 \
+   || ui_generation_cleanup_tombstones "$ui_root" >/dev/null 2>&1; then
+    fail "writable tombstone content was accepted or cleaned"
+fi
+metadata_tombstone_after="$(tree_fingerprint "$metadata_tombstone")" \
+    || fail "unsafe-metadata tombstone disappeared after rejection"
+[[ "$metadata_tombstone_after" == "$metadata_tombstone_before" ]] \
+    || fail "unsafe-metadata tombstone rejection changed its tree"
+chmod 0644 "$metadata_tombstone/index.html"
+_ui_generation_remove_tombstone_exact "$ui_root" "$metadata_tombstone" \
+    || fail "restored strict tombstone metadata did not become cleanable"
+pass "tombstone cleanup requires exact scope, ownership marker, shape, and metadata"
+
+mount_tombstone="$ui_root/generations/.delete.888888.888888"
+cp -a -- "$ui_root/$tombstone_current" "$mount_tombstone"
+blocked_mount_entry="$mount_tombstone/index.html"
+original_same_mount="$(declare -f _ui_generation_same_mount_boundary)"
+_ui_generation_same_mount_boundary() {
+    [[ "$2" != "$blocked_mount_entry" ]]
+}
+if _ui_generation_remove_tombstone_exact "$ui_root" "$mount_tombstone" \
+        >/dev/null 2>&1; then
+    fail "tombstone cleanup ignored a per-entry mount-boundary failure"
+fi
+eval "$original_same_mount"
+[[ -d "$mount_tombstone" && -f "$blocked_mount_entry" \
+   && -f "$mount_tombstone/$UI_GENERATION_ENTRY_MARKER" ]] \
+    || fail "mount-boundary rejection removed the blocked entry or ownership evidence"
+_ui_generation_remove_tombstone_exact "$ui_root" "$mount_tombstone" \
+    || fail "mount-safe tombstone did not converge after the injected boundary cleared"
+
+nonrecursive_tombstone="$ui_root/generations/.delete.333333.333333"
+cp -a -- "$ui_root/$tombstone_current" "$nonrecursive_tombstone"
+TOMBSTONE_REAL_RM="$(command -v rm)"
+TOMBSTONE_RECURSIVE_SENTINEL="$TMP/ui-tombstone-recursive-rm"
+rm() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --recursive|--recursive=*|-r|-R|-*[rR]*)
+                : > "$TOMBSTONE_RECURSIVE_SENTINEL"
+                return 98
+                ;;
+        esac
+    done
+    "$TOMBSTONE_REAL_RM" "$@"
+}
+if ! _ui_generation_remove_tombstone_exact "$ui_root" "$nonrecursive_tombstone"; then
+    unset -f rm
+    fail "plain-entry tombstone cleanup failed under recursive-rm guard"
+fi
+unset -f rm
+[[ ! -e "$TOMBSTONE_RECURSIVE_SENTINEL" \
+   && ! -e "$nonrecursive_tombstone" && ! -L "$nonrecursive_tombstone" ]] \
+    || fail "UI tombstone cleanup attempted recursive deletion"
+tombstone_remove_body="$(sed -n \
+    '/^_ui_generation_remove_tombstone_exact()/,/^}/p' \
+    "$ROOT/scripts/ui-generation.sh")"
+grep -Eq 'command[[:space:]]+rm|rm[[:space:]]+.*(-r|-R|--recursive)' \
+    <<< "$tombstone_remove_body" \
+    && fail "UI tombstone cleanup contains recursive deletion"
+pass "tombstone cleanup rechecks every entry and never recursively crosses a mount"
+
+pre_marker_sync_tombstone="$ui_root/generations/.delete.777777.777777"
+cp -a -- "$ui_root/$tombstone_current" "$pre_marker_sync_tombstone"
+TOMBSTONE_REAL_SYNC="$(command -v sync)"
+TOMBSTONE_SYNC_CALLS=0
+TOMBSTONE_SYNC_TARGET="$pre_marker_sync_tombstone"
+sync() {
+    if [[ "$*" == "-f $TOMBSTONE_SYNC_TARGET" ]]; then
+        TOMBSTONE_SYNC_CALLS=$((TOMBSTONE_SYNC_CALLS + 1))
+        [[ "$TOMBSTONE_SYNC_CALLS" != 1 ]] || return 1
+    fi
+    "$TOMBSTONE_REAL_SYNC" "$@"
+}
+if _ui_generation_remove_tombstone_exact "$ui_root" "$pre_marker_sync_tombstone" \
+        >/dev/null 2>&1; then
+    fail "pre-marker tombstone sync failure was accepted"
+fi
+unset -f sync
+[[ -d "$pre_marker_sync_tombstone" \
+   && -f "$pre_marker_sync_tombstone/$UI_GENERATION_ENTRY_MARKER" ]] \
+    || fail "pre-marker sync failure discarded recoverable ownership evidence"
+_ui_generation_tombstone_is_safe "$ui_root" "$pre_marker_sync_tombstone" \
+    || fail "pre-marker sync failure left an unsafe tombstone"
+_ui_generation_remove_tombstone_exact "$ui_root" "$pre_marker_sync_tombstone" \
+    || fail "pre-marker sync failure did not converge on retry"
+
+post_marker_sync_tombstone="$ui_root/generations/.delete.666666.666666"
+cp -a -- "$ui_root/$tombstone_current" "$post_marker_sync_tombstone"
+TOMBSTONE_SYNC_CALLS=0
+TOMBSTONE_SYNC_TARGET="$post_marker_sync_tombstone"
+sync() {
+    if [[ "$*" == "-f $TOMBSTONE_SYNC_TARGET" ]]; then
+        TOMBSTONE_SYNC_CALLS=$((TOMBSTONE_SYNC_CALLS + 1))
+        [[ "$TOMBSTONE_SYNC_CALLS" != 2 ]] || return 1
+    fi
+    "$TOMBSTONE_REAL_SYNC" "$@"
+}
+if _ui_generation_remove_tombstone_exact "$ui_root" "$post_marker_sync_tombstone" \
+        >/dev/null 2>&1; then
+    fail "post-marker tombstone sync failure was accepted"
+fi
+unset -f sync
+[[ -d "$post_marker_sync_tombstone" \
+   && ! -e "$post_marker_sync_tombstone/$UI_GENERATION_ENTRY_MARKER" \
+   && -z "$(find "$post_marker_sync_tombstone" -mindepth 1 -print -quit)" ]] \
+    || fail "post-marker sync failure did not leave the exact empty restart state"
+_ui_generation_tombstone_is_safe "$ui_root" "$post_marker_sync_tombstone" \
+    || fail "post-marker sync failure left an unsafe empty tombstone"
+_ui_generation_remove_tombstone_exact "$ui_root" "$post_marker_sync_tombstone" \
+    || fail "post-marker sync failure did not converge on retry"
+pass "content and marker durability barriers preserve both tombstone restart states"
+
+gc_race_candidate="$(ui_generation_clone_current "$ui_root")" \
+    || fail "could not prepare final GC protection-race candidate"
+complete_candidate_profiles "$gc_race_candidate" gc-race
+gc_race_name="$(basename -- "$gc_race_candidate")"
+gc_race_committed="generations/${gc_race_name#.candidate-}"
+gc_race_injected=""
+gc_race_delete_target=""
+_ui_generation_before_gc_rename() {
+    local candidate relative
+    local -a candidates=()
+    [[ "$1" == "$ui_root" && -d "$2" ]] || return 1
+    gc_race_delete_target="generations/$(basename -- "$2")"
+    _ui_generation_find_entries candidates "$ui_root/generations" \
+        -mindepth 1 -maxdepth 1 -type d -name 'generation-*' || return 1
+    for candidate in "${candidates[@]}"; do
+        relative="generations/$(basename -- "$candidate")"
+        [[ "$relative" != "$gc_race_delete_target" \
+           && "$relative" != "$3" \
+           && ( "$4" == absent || "$relative" != "$4" ) ]] || continue
+        gc_race_injected="$relative"
+        break
+    done
+    [[ -n "$gc_race_injected" ]] || return 1
+    rm -f -- "$ui_root/current" || return 1
+    ln -s -- "$gc_race_injected" "$ui_root/current"
+}
+ui_generation_publish "$ui_root" "$gc_race_candidate" \
+    || fail "GC protection drift incorrectly failed the committed publication"
+_ui_generation_before_gc_rename() { :; }
+[[ "$UI_GENERATION_COMMIT_STATE" == committed && "$UI_GENERATION_GC_WARNING" == 1 \
+   && -n "$gc_race_injected" \
+   && -n "$gc_race_delete_target" \
+   && "$gc_race_injected" != "$gc_race_delete_target" \
+   && "$(readlink -- "$ui_root/current")" == "$gc_race_injected" \
+   && -d "$ui_root/$gc_race_injected" \
+   && -d "$ui_root/$gc_race_delete_target" \
+   && -d "$ui_root/$gc_race_committed" ]] \
+    || fail "final GC protection recheck deleted current or hid the committed generation"
+rm -f -- "$ui_root/current"
+ln -s -- "$gc_race_committed" "$ui_root/current"
+sync -f "$ui_root"
+_ui_generation_current_only_is_safe "$ui_root" \
+    || fail "GC protection-race fixture could not restore the committed current"
+pass "formal GC rereads current and previous protection immediately before rename"
+
 sync_candidate="$(ui_generation_clone_current "$ui_root")" \
     || fail "could not prepare root-sync failure candidate"
 complete_candidate_profiles "$sync_candidate" sync-failure
@@ -436,9 +727,37 @@ fi
     || fail "unsafe current caused generation deletion before validation"
 rm -f "$ui_root/current"
 ln -s "$safe_target" "$ui_root/current"
+remove_root_generations_before="$(tree_fingerprint "$ui_root/generations")" \
+    || fail "could not fingerprint generations before uninstall pointer fence"
+REMOVE_ROOT_REAL_SYNC="$(command -v sync)"
+FAIL_REMOVE_ROOT_SYNC=1
+sync() {
+    if [[ "$FAIL_REMOVE_ROOT_SYNC" == 1 && "$*" == "-f $ui_root" ]]; then
+        FAIL_REMOVE_ROOT_SYNC=0
+        return 1
+    fi
+    "$REMOVE_ROOT_REAL_SYNC" "$@"
+}
+if ui_generation_remove_root "$ui_root" >/dev/null 2>&1; then
+    fail "uninstall accepted a failed durable current withdrawal"
+fi
+remove_root_generations_after="$(tree_fingerprint "$ui_root/generations")" \
+    || fail "could not fingerprint generations after uninstall pointer-fence failure"
+[[ ! -e "$ui_root/current" && ! -L "$ui_root/current" \
+   && "$remove_root_generations_after" == "$remove_root_generations_before" ]] \
+    || fail "uninstall deleted a generation before current withdrawal was durable"
+FAIL_REMOVE_ROOT_SYNC=1
+if ui_generation_remove_root "$ui_root" >/dev/null 2>&1; then
+    fail "uninstall retry skipped the durable absent-current fence"
+fi
+unset -f sync
+remove_root_generations_retry="$(tree_fingerprint "$ui_root/generations")" \
+    || fail "could not fingerprint generations after uninstall retry-fence failure"
+[[ "$remove_root_generations_retry" == "$remove_root_generations_before" ]] \
+    || fail "uninstall retry deleted a generation before the root fence"
 ui_generation_remove_root "$ui_root" || fail "validated generation root could not be removed"
 [[ ! -e "$ui_root" && ! -L "$ui_root" ]] || fail "UI generation root remains after safe removal"
-pass "uninstall validates current and per-generation markers before deletion"
+pass "uninstall durably withdraws current before tombstoned generation deletion"
 
 # Claiming the root is destructive to unpublished candidates by design: it is
 # the "nothing is staged yet" entry point, so it sweeps every `.candidate-*`.
@@ -457,9 +776,12 @@ ui_generation_claim_root "$claim_root" || fail "could not claim a fresh generati
 swept="$(ui_generation_stage_tree "$claim_root" "$sweep_dist" v0.0.0-sweep)" \
     || fail "could not stage a candidate into the claimed root"
 [[ -d "$swept" ]] || fail "staged candidate is missing before the claim contract is exercised"
+claim_tombstone="$claim_root/generations/.delete.222222.222222"
+mkdir "$claim_tombstone"
+chmod 0755 "$claim_tombstone"
 ui_generation_claim_root "$claim_root" || fail "re-claiming a staged root failed outright"
-[[ ! -e "$swept" ]] \
-    || fail "claiming the root no longer sweeps unpublished candidates; the guard below is stale"
+[[ ! -e "$swept" && ! -e "$claim_tombstone" ]] \
+    || fail "claim did not order candidate cleanup before tombstone recovery"
 pass "claiming the generation root sweeps unpublished candidates"
 
 if awk '/^prepare_ios_profile\(\)/{f=1} f&&/^}/{exit} f' "$ROOT/install.sh" \

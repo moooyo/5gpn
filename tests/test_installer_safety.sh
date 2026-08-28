@@ -122,14 +122,15 @@ fi
 rmdir "$unit_conflicts/5gpn-.service.d"
 
 mkdir "$unit_conflicts/service.d"
-cat > "$unit_conflicts/service.d/10-host-defaults.conf" <<'EOF'
-[Service]
-TimeoutStopSec=90s
+cat > "$unit_conflicts/service.d/10-host-comments.conf" <<'EOF'
+# Type-wide operator note without a unit assignment.
+; Comments do not alter the managed unit.
 EOF
-if systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts"; then
-    fail "unrelated global service default was treated as an execution override"
+if systemd_global_dropin_has_managed_override \
+        "$unit_conflicts/service.d" service; then
+    fail "comments-only global service drop-in was treated as an override"
 else
-    pass "unrelated global service defaults remain compatible"
+    pass "comments-only global service drop-ins remain compatible"
 fi
 cat > "$unit_conflicts/service.d/15-start-timeout.conf" <<'EOF'
 [Service]
@@ -165,6 +166,25 @@ else
     fail "global service SuccessExitStatus override was ignored"
 fi
 rm -f -- "$unit_conflicts/service.d/20-success-status.conf"
+service_lifecycle_override_ok=1
+for assignment in \
+    'TimeoutStopSec=90s' \
+    'RemainAfterExit=yes' \
+    'RuntimeMaxSec=30s' \
+    'WatchdogSec=15s'; do
+    printf '[Service]\n%s\n' "$assignment" \
+        > "$unit_conflicts/service.d/20-lifecycle.conf"
+    if ! systemd_unit_has_dropins 5gpn-mihomo.service "$unit_conflicts" \
+       || [[ "$SYSTEMD_UNIT_CONFLICT_REASON" != \
+             "managed directive in global drop-in directory $unit_conflicts/service.d" ]]; then
+        fail "global service lifecycle override was ignored: ${assignment%%=*}"
+        service_lifecycle_override_ok=0
+    fi
+done
+rm -f -- "$unit_conflicts/service.d/20-lifecycle.conf"
+if [[ "$service_lifecycle_override_ok" == 1 ]]; then
+    pass "global service lifecycle directives cannot alter the managed process contract"
+fi
 cat > "$unit_conflicts/service.d/20-continuation.conf" <<'EOF'
 [Service]
 ExecStartPre\
@@ -230,6 +250,41 @@ if systemd_unit_has_dropins 5gpn-intercept-cert.path "$unit_conflicts" \
     pass "global Unit and Install directives are rejected for path and timer units"
 else
     fail "a path/timer global Unit or Install directive bypassed override detection"
+fi
+rm -f -- "$unit_conflicts/path.d/20-unit.conf" \
+    "$unit_conflicts/timer.d/20-install.conf"
+path_override_ok=1
+for assignment in \
+    'DirectoryMode=0750' \
+    'TriggerLimitIntervalSec=30s' \
+    'TriggerLimitBurst=1'; do
+    printf '[Path]\n%s\n' "$assignment" \
+        > "$unit_conflicts/path.d/20-path.conf"
+    if ! systemd_unit_has_dropins 5gpn-intercept-cert.path "$unit_conflicts" \
+       || [[ "$SYSTEMD_UNIT_CONFLICT_REASON" != \
+             "managed directive in global drop-in directory $unit_conflicts/path.d" ]]; then
+        fail "global path directive was ignored: ${assignment%%=*}"
+        path_override_ok=0
+    fi
+done
+rm -f -- "$unit_conflicts/path.d/20-path.conf"
+timer_override_ok=1
+for assignment in \
+    'AccuracySec=1s' \
+    'WakeSystem=yes' \
+    'RemainAfterElapse=no'; do
+    printf '[Timer]\n%s\n' "$assignment" \
+        > "$unit_conflicts/timer.d/20-timer.conf"
+    if ! systemd_unit_has_dropins 5gpn-certbot-renew.timer "$unit_conflicts" \
+       || [[ "$SYSTEMD_UNIT_CONFLICT_REASON" != \
+             "managed directive in global drop-in directory $unit_conflicts/timer.d" ]]; then
+        fail "global timer directive was ignored: ${assignment%%=*}"
+        timer_override_ok=0
+    fi
+done
+rm -f -- "$unit_conflicts/timer.d/20-timer.conf"
+if [[ "$path_override_ok" == 1 && "$timer_override_ok" == 1 ]]; then
+    pass "all inherited Path and Timer assignments are rejected without directive denylists"
 fi
 rm -rf -- "$unit_conflicts/path.d" "$unit_conflicts/timer.d"
 resource_override_ok=1

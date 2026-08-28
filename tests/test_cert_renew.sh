@@ -409,6 +409,17 @@ expect_log "certbot renew --cert-name example.com --non-interactive" "timer-styl
 expect_no_log "dig " "Cloudflare renewal does not run the HTTP DNS gate"
 expect_no_log "systemctl " "Cloudflare renewal does not touch mihomo"
 
+# Retained ownership can name older, dormant lineages after a base switch. The
+# scoped timer must still derive exactly one target from the current dns.env.
+reset_case
+CFG_MODE=cloudflare
+write_renewal_conf
+printf 'version=1\nowned=example.com\nowned=old.example\n' > "$CERTBOT_OWNERSHIP_FILE"
+chmod 0640 "$CERTBOT_OWNERSHIP_FILE"
+expect_success "multi-base ownership renews only the currently selected lineage" cert_renew_main
+expect_log "certbot renew --cert-name example.com --non-interactive" "current base remains the only scoped renewal target"
+expect_no_log "--cert-name old.example" "older owned lineage remains dormant after the base switch"
+
 # Root-executed per-lineage hooks are never adopted; 5gpn uses its one audited
 # directory deploy hook and mode-aware wrapper instead.
 reset_case

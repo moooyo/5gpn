@@ -86,6 +86,11 @@ while (($#)); do
     esac
 done
 [[ -n "$RELEASE_TAG" ]] || usage
+release_number='(0|[1-9][0-9]*)'
+stable_release_re="^${release_number}\.${release_number}\.${release_number}$"
+beta_release_re="^${release_number}\.${release_number}\.${release_number}-beta\.([1-9][0-9]*)$"
+[[ "$RELEASE_TAG" =~ $stable_release_re || "$RELEASE_TAG" =~ $beta_release_re ]] \
+    || fail 'release tag must be X.Y.Z or X.Y.Z-beta.N without leading zeroes'
 
 cd "$ROOT"
 
