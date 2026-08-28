@@ -219,6 +219,46 @@ if (
 else
     fail "installer can disable renewal needed by an unrelated lineage"
 fi
+
+owned_switch_root="$cert_ownership_tmp/owned-switch"
+mkdir -p "$owned_switch_root/le/live/old.example" \
+    "$owned_switch_root/le/archive/old.example" "$owned_switch_root/le/renewal" \
+    "$owned_switch_root/cert"
+: > "$owned_switch_root/le/renewal/old.example.conf"
+printf 'version=1\nowned=old.example\n' > "$owned_switch_root/cert/.certbot-ownership"
+chmod 0640 "$owned_switch_root/cert/.certbot-ownership"
+if (
+    LE_LIVE_ROOT="$owned_switch_root/le/live"
+    LE_ARCHIVE_ROOT="$owned_switch_root/le/archive"
+    LE_RENEWAL_ROOT="$owned_switch_root/le/renewal"
+    CERTBOT_OWNERSHIP_FILE="$owned_switch_root/cert/.certbot-ownership"
+    root_plain_file_metadata_is_safe() {
+        [[ -f "$1" && ! -L "$1" && "$(file_mode "$1")" == "$3" \
+           && "$(file_nlink "$1")" == 1 ]]
+    }
+    certbot_lineage_set_is_exclusive new.example >/dev/null
+); then
+    pass "a base switch can take over the distro timer while an older exact owned lineage remains"
+else
+    fail "durable ownership of an older canonical lineage still blocks a base-domain switch"
+fi
+
+mkdir -p "$owned_switch_root/le/live/external.example"
+if (
+    LE_LIVE_ROOT="$owned_switch_root/le/live"
+    LE_ARCHIVE_ROOT="$owned_switch_root/le/archive"
+    LE_RENEWAL_ROOT="$owned_switch_root/le/renewal"
+    CERTBOT_OWNERSHIP_FILE="$owned_switch_root/cert/.certbot-ownership"
+    root_plain_file_metadata_is_safe() {
+        [[ -f "$1" && ! -L "$1" && "$(file_mode "$1")" == "$3" \
+           && "$(file_nlink "$1")" == 1 ]]
+    }
+    ! certbot_lineage_set_is_exclusive new.example >/dev/null 2>&1
+); then
+    pass "an ownership whitelist never admits an external Certbot lineage"
+else
+    fail "retained 5gpn ownership widened timer takeover to an external lineage"
+fi
 : > "$cert_ownership_tmp/timer.log"
 if (
     timer_active=active
@@ -695,6 +735,62 @@ else
     fail "debug mode overwrote the only proof needed to return to production or decommission"
 fi
 rm -rf -- "$ownership_tmp"
+
+provenance_tmp="$(mktemp -d)"
+printf 'mode=cloudflare\nbase=old.example\ncertbot_lineage=reused\n' \
+    > "$provenance_tmp/.provenance"
+chmod 0640 "$provenance_tmp/.provenance"
+if (
+    DNS_CERT_DIR="$provenance_tmp"
+    ensure_dns_cert_root() { return 0; }
+    cert_root_is_safe() { return 0; }
+    err() { :; }
+    sync() {
+        [[ "$1" == -f && "$2" == "$DNS_CERT_DIR"/.provenance.* ]] && return 73
+        return 0
+    }
+    ! write_cert_provenance cloudflare new.example reused \
+        && grep -Fxq 'base=old.example' "$DNS_CERT_DIR/.provenance" \
+        && [[ "$CERT_PROVENANCE_COMMIT_STATE" == not-committed ]] \
+        && ! compgen -G "$DNS_CERT_DIR/.provenance.??????" >/dev/null
+); then
+    pass "provenance candidate sync failure is fatal before commit and cleans its temporary file"
+else
+    fail "provenance candidate sync failure changed the live record or escaped as success"
+fi
+
+if (
+    DNS_CERT_DIR="$provenance_tmp"
+    ensure_dns_cert_root() { return 0; }
+    cert_root_is_safe() { return 0; }
+    err() { :; }
+    sync() {
+        [[ "$1" == -f && "$2" == "$DNS_CERT_DIR" ]] && return 74
+        return 0
+    }
+    ! write_cert_provenance http-01 new.example reused \
+        && grep -Fxq 'mode=http-01' "$DNS_CERT_DIR/.provenance" \
+        && grep -Fxq 'base=new.example' "$DNS_CERT_DIR/.provenance" \
+        && [[ "$CERT_PROVENANCE_COMMIT_STATE" == committed-undurable ]]
+); then
+    pass "post-rename provenance sync failure is fatal and reports committed-undurable"
+else
+    fail "post-rename provenance sync failure was rolled back, accepted, or misclassified"
+fi
+
+if (
+    CONFIGURE_DNS_GATEWAY_COMMIT_STATE=not-committed
+    DNS_ENV_PUBLICATION_COMMIT_STATE=not-committed
+    CERT_ROLE_CTL_COMMIT_STATE=not-committed
+    CONFIGURE_CERT_PUBLICATION_COMPLETED=0
+    CERT_PROVENANCE_COMMIT_STATE=committed-undurable
+    configure_visible_coordinate_was_committed
+); then
+    pass "configure treats committed-undurable provenance as a visible certificate commit"
+else
+    fail "configure could restore runtime across a visible undurable provenance replacement"
+fi
+rm -rf -- "$provenance_tmp"
 
 lineage_reuse_tmp="$(mktemp -d)"
 

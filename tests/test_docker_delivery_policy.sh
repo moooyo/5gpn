@@ -16,6 +16,7 @@ PINS_LIBRARY="$ROOT/release/pins.sh"
 MIHOMO_TEMPLATE="$ROOT/etc/mihomo/config.yaml.tmpl"
 CHECKS="$ROOT/.github/workflows/checks.yml"
 RELEASE="$ROOT/.github/workflows/release.yml"
+DOCKER_GUIDE="$ROOT/docs/docker.md"
 FAIL=0
 
 pass() { echo "ok: $*"; }
@@ -123,7 +124,7 @@ else
 fi
 
 compose_required=(
-    '    image: ${FIVEGPN_IMAGE:?set FIVEGPN_IMAGE to an exact ghcr.io/moooyo/5gpn tag}'
+    '    image: ${FIVEGPN_IMAGE:?set FIVEGPN_IMAGE to the exact ghcr.io/moooyo/5gpn tag@sha256:REPLACE_WITH_RELEASE_MANIFEST_DIGEST reference from the GitHub Release body}'
     '    user: "10001:10001"'
     '    ports:'
     '      - "0.0.0.0:853:853/tcp"'
@@ -272,6 +273,69 @@ else
     fail "hosted CI Docker coverage exceeds or misses its static-build boundary"
 fi
 
+if awk '
+    function finish_checkout() {
+        if (!in_checkout) return
+        if (expect_with || persist_count != 1 || token_count != 0) failed=1
+        in_checkout=0
+        expect_with=0
+        in_with=0
+    }
+    {
+        if (in_checkout) {
+            if (expect_with) {
+                if ($0 != checkout_prefix "  with:") {
+                    failed=1
+                    finish_checkout()
+                } else {
+                    expect_with=0
+                    in_with=1
+                    next
+                }
+            } else if (in_with) {
+                option_prefix=checkout_prefix "    "
+                if (index($0, option_prefix) == 1) {
+                    if (index($0, option_prefix "persist-credentials:") == 1) {
+                        persist_count++
+                        if ($0 != option_prefix "persist-credentials: false") failed=1
+                    }
+                    if ($0 ~ /^[[:space:]]*token[[:space:]]*:/) token_count++
+                    next
+                }
+                finish_checkout()
+            }
+        }
+        if ($0 ~ /^[[:space:]]*- uses: actions\/checkout@/) {
+            checkout_prefix=$0
+            sub(/- uses:.*/, "", checkout_prefix)
+            in_checkout=1
+            expect_with=1
+            persist_count=0
+            token_count=0
+            checkout_count++
+        }
+    }
+    END {
+        finish_checkout()
+        exit !(checkout_count > 0 && !failed)
+    }
+' "$RELEASE"; then
+    pass "release checkouts do not persist the write-scoped token into the build tree"
+else
+    fail "a release checkout lacks an adjacent non-persistent credential policy or names a token"
+fi
+
+pre_auth_build="$(sed -n '/^  build:/,/- name: Authenticate to GHCR and bind the exact image identity/p' "$RELEASE")"
+if grep -Fq -- '- name: Revalidate immutable release identity' <<<"$pre_auth_build" \
+   && grep -Fq -- '- name: Build exact-tag Linux amd64 image' <<<"$pre_auth_build" \
+   && grep -Fq -- '- name: Authenticate to GHCR and bind the exact image identity' <<<"$pre_auth_build" \
+   && ! grep -Eq 'github\.token|secrets(\.|\[)|(^|[^[:alnum:]_])(GH_TOKEN|GITHUB_TOKEN)([^[:alnum:]_]|$)|with:[[:space:]]*(\{[[:space:]]*)?token[[:space:]]*:|^[[:space:]]+token[[:space:]]*:' \
+        <<<"$pre_auth_build"; then
+    pass "release revalidation and build run before any explicit repository credential"
+else
+    fail "release revalidation or build can reference a repository credential before publication"
+fi
+
 if grep -Fq 'packages: write' "$RELEASE" \
    && grep -Fq 'IMAGE: ghcr.io/moooyo/5gpn:${{ github.ref_name }}' "$RELEASE" \
    && grep -Fq 'remote_id" == "$candidate_id" && "$remote_labels" == "$candidate_labels' "$RELEASE" \
@@ -295,13 +359,14 @@ fi
 
 # docker/build-candidate-image.sh refuses a dirty working tree, and packaging the
 # installer bundle writes its stage directory, tarball, and checksums into that
-# tree. So the image must be built first. This ordering had never been exercised:
-# every release before 2026-08-22 failed at the acceptance gate that preceded
-# both steps, so the image build was never reached and the conflict stayed
-# invisible until that gate was removed.
+# tree. The image must therefore be built first; this ordering is a permanent
+# contract regardless of which release first exercised both paths.
 image_build_line="$(grep -n 'name: Build exact-tag Linux amd64 image' "$RELEASE" | head -1 | cut -d: -f1)"
 bundle_line="$(grep -n 'name: Package installer bundle' "$RELEASE" | head -1 | cut -d: -f1)"
-if [[ "$image_build_line" =~ ^[0-9]+$ && "$bundle_line" =~ ^[0-9]+$    && "$image_build_line" -lt "$bundle_line" ]]    && grep -Fq 'the working tree is dirty; acceptance requires a clean checkout' \n        "$ROOT/docker/build-candidate-image.sh"; then
+if [[ "$image_build_line" =~ ^[0-9]+$ && "$bundle_line" =~ ^[0-9]+$ \
+   && "$image_build_line" -lt "$bundle_line" ]] \
+   && grep -Fq 'the working tree is dirty; acceptance requires a clean checkout' \
+        "$ROOT/docker/build-candidate-image.sh"; then
     pass "the exact-tag image is built before packaging dirties the working tree"
 else
     fail "installer packaging precedes the image build and will fail its clean-tree check"
@@ -326,6 +391,8 @@ if grep -Fq "grep -Fxq 'MIHOMO_SOURCE=pinned-release'" "$CANDIDATE_BUILD" \
    && grep -Fq 'BUILDKIT_DIGEST=sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "$CANDIDATE_BUILD" \
    && grep -Fq 'rewrite-timestamp=true' "$CANDIDATE_BUILD" \
    && grep -Fq 'VERSION=${RELEASE_TAG}' "$CANDIDATE_BUILD" \
+   && grep -Fq '[[ "$RELEASE_TAG" =~ $stable_release_re || "$RELEASE_TAG" =~ $beta_release_re ]]' "$CANDIDATE_BUILD" \
+   && grep -Fq 'release tag must be X.Y.Z or X.Y.Z-beta.N without leading zeroes' "$CANDIDATE_BUILD" \
    && grep -Fq 'git status --porcelain' "$CANDIDATE_BUILD"; then
     pass "the candidate build pins its frontend, epoch, tag, and clean checkout"
 else
@@ -345,6 +412,7 @@ else
 fi
 
 ACCEPTANCE="$ROOT/tests/container-acceptance.sh"
+PROBE_LIBRARY="$ROOT/tests/docker/probe-lib.sh"
 if grep -Fq 'FIVEGPN_EXPECTED_COMMIT' "$ACCEPTANCE" \
    && grep -Fq 'FIVEGPN_ACCEPTANCE_TARGET' "$ACCEPTANCE" \
    && grep -Fq 'disposable' "$ACCEPTANCE" \
@@ -370,6 +438,141 @@ if grep -Fq 'FIVEGPN_EXPECTED_COMMIT' "$ACCEPTANCE" \
     pass "test-env acceptance binds the exact clean candidate and uses only versioned probes"
 else
     fail "test-env acceptance can use an unversioned probe or emit ambiguous evidence"
+fi
+
+secret_source_line="$(grep -nF 'candidate_secret="$(jq -er .secret' \
+    "$ACCEPTANCE" | head -1 | cut -d: -f1)"
+leaf_match_line="$(grep -nF 'loopback HTTPS publication does not serve the candidate controller leaf' \
+    "$ACCEPTANCE" | head -1 | cut -d: -f1)"
+header_line="$(grep -nF "printf 'Authorization: Bearer %s\\n'" \
+    "$ACCEPTANCE" | head -1 | cut -d: -f1)"
+mapfile -t descriptor_wait_lines < <(
+    grep -n '^wait_for_candidate_controller_descriptor$' "$ACCEPTANCE" | cut -d: -f1
+)
+mapfile -t authenticated_wait_lines < <(
+    grep -n '^wait_for_authenticated_capabilities$' "$ACCEPTANCE" | cut -d: -f1
+)
+mapfile -t pid1_assert_lines < <(
+    grep -n '^assert_pid1_live$' "$ACCEPTANCE" | cut -d: -f1
+)
+initial_tls_wait_line="$(grep -n '^wait_for_controller_tls_listener$' \
+    "$ACCEPTANCE" | head -1 | cut -d: -f1)"
+initial_boundary_line="$(grep -nF 'before_image_labels="$(assert_container_boundary)"' \
+    "$ACCEPTANCE" | head -1 | cut -d: -f1)"
+public_probe_line="$(grep -nF 'public_evidence="$(docker exec' \
+    "$ACCEPTANCE" | head -1 | cut -d: -f1)"
+recreate_switch_line="$(grep -nF 'CONTAINER="$new_container"' \
+    "$ACCEPTANCE" | head -1 | cut -d: -f1)"
+recreate_boundary_line="$(grep -nF 'after_image_labels="$(assert_container_boundary)"' \
+    "$ACCEPTANCE" | head -1 | cut -d: -f1)"
+recreate_final_runtime_line="$(grep -n '^assert_candidate_runtime_clean$' \
+    "$ACCEPTANCE" | tail -1 | cut -d: -f1)"
+recreate_pre_ready_body=''
+if [[ "$recreate_switch_line" =~ ^[0-9]+$ \
+   && "${authenticated_wait_lines[1]:-}" =~ ^[0-9]+$ \
+   && "$recreate_switch_line" -lt "${authenticated_wait_lines[1]}" ]]; then
+    recreate_pre_ready_body="$(sed -n "$((recreate_switch_line + 1)),$((authenticated_wait_lines[1] - 1))p" \
+        "$ACCEPTANCE")"
+fi
+if ! grep -Eq 'FIVEGPN_CAPABILITIES_URL|FIVEGPN_CONTROLLER_SECRET_FILE|FIVEGPN_CONTROLLER_RESOLVE_IP|FIVEGPN_PROBE_API_ORIGIN|FIVEGPN_PROBE_CONTROLLER_RESOLVE_IP' \
+       "$ACCEPTANCE" "$PROBE_LIBRARY" "$DOCKER_GUIDE" \
+   && grep -Fq 's/^DNS_BASE_DOMAIN=//p' "$ACCEPTANCE" \
+   && grep -Fq 'CONTROLLER_HOST="console.${base}"' "$ACCEPTANCE" \
+   && grep -Fq 'inspect_candidate_controller' "$ACCEPTANCE" \
+   && grep -Fq 'CONTROLLER_SECRET="$candidate_secret"' "$ACCEPTANCE" \
+   && grep -Fq 'export FIVEGPN_PROBE_CONTROLLER_HOST="$CONTROLLER_HOST"' "$ACCEPTANCE" \
+   && grep -Fq 'export FIVEGPN_PROBE_CONTROLLER_PORT="$CONTROLLER_PORT"' "$ACCEPTANCE" \
+   && grep -Fq 'export FIVEGPN_PROBE_CONTROLLER_PINNED_PUBKEY="sha256//${pin_body}"' "$ACCEPTANCE" \
+   && [[ "$secret_source_line" =~ ^[0-9]+$ && "$leaf_match_line" =~ ^[0-9]+$ \
+      && "$header_line" =~ ^[0-9]+$ \
+      && "$secret_source_line" -lt "$header_line" \
+      && "$leaf_match_line" -lt "$header_line" ]] \
+   && [[ "${#descriptor_wait_lines[@]}" == 3 \
+      && "${#authenticated_wait_lines[@]}" == 3 \
+      && "${#pid1_assert_lines[@]}" == 2 \
+      && "$initial_tls_wait_line" =~ ^[0-9]+$ \
+      && "$initial_boundary_line" =~ ^[0-9]+$ \
+      && "$public_probe_line" =~ ^[0-9]+$ \
+      && "$recreate_switch_line" =~ ^[0-9]+$ \
+      && "$recreate_boundary_line" =~ ^[0-9]+$ \
+      && "$recreate_final_runtime_line" =~ ^[0-9]+$ \
+      && "$initial_tls_wait_line" -lt "$initial_boundary_line" \
+      && "$initial_boundary_line" -lt "${descriptor_wait_lines[0]:-0}" \
+      && "${descriptor_wait_lines[0]:-0}" -lt "${authenticated_wait_lines[0]:-0}" \
+      && "$public_probe_line" -lt "${descriptor_wait_lines[1]:-0}" \
+      && "${descriptor_wait_lines[1]:-0}" -lt "${pid1_assert_lines[1]:-0}" \
+      && "$recreate_switch_line" -lt "${authenticated_wait_lines[1]:-0}" \
+      && "${authenticated_wait_lines[1]:-0}" -lt "$recreate_boundary_line" \
+      && "$recreate_boundary_line" -lt "${descriptor_wait_lines[2]:-0}" \
+      && "${descriptor_wait_lines[2]:-0}" -lt "${authenticated_wait_lines[2]:-0}" \
+      && "${authenticated_wait_lines[2]:-0}" -lt "$recreate_final_runtime_line" ]] \
+   && [[ -n "$recreate_pre_ready_body" \
+      && "$recreate_pre_ready_body" != *'docker exec'* ]] \
+   && [[ "$(grep -Fc -- '--resolve "${FIVEGPN_PROBE_CONTROLLER_HOST}:${FIVEGPN_PROBE_CONTROLLER_PORT}:127.0.0.1"' \
+        "$PROBE_LIBRARY")" == 1 ]] \
+   && grep -Fq -- '--disable' "$PROBE_LIBRARY" \
+   && grep -Fq -- "--proto '=https'" "$PROBE_LIBRARY" \
+   && grep -Fq -- '--pinnedpubkey "$FIVEGPN_PROBE_CONTROLLER_PINNED_PUBKEY"' "$PROBE_LIBRARY" \
+   && grep -Fq 'https://${FIVEGPN_PROBE_CONTROLLER_HOST}:${FIVEGPN_PROBE_CONTROLLER_PORT}${path}' \
+        "$PROBE_LIBRARY"; then
+    pass "controller acceptance derives and verifies the candidate endpoint before authenticated loopback requests"
+else
+    fail "controller acceptance can authenticate to a target not bound to the candidate"
+fi
+
+if grep -Fq 'FIVEGPN_EXPECTED_RELEASE_TAG' "$ACCEPTANCE" \
+   && grep -Fq 'FIVEGPN_EXPECTED_RELEASE_TAG="$accepted_release_tag"' "$DOCKER_GUIDE" \
+   && grep -Fq 'org.opencontainers.image.version' "$ACCEPTANCE" \
+   && grep -Fq '.[0].Config.Labels["org.opencontainers.image.version"] == $release_tag' "$ACCEPTANCE" \
+   && grep -Fq '&& -z "$EXPECTED_RELEASE_TAG" && -z "$EXPECTED_MIHOMO_SHA256"' "$ACCEPTANCE" \
+   && grep -Fq 'candidate_descriptor' "$ACCEPTANCE" \
+   && grep -Fq 'image_config_digest: $image_config_digest' "$ACCEPTANCE" \
+   && grep -Fq 'platform: "linux/amd64"' "$ACCEPTANCE"; then
+    pass "release acceptance binds the expected tag to the candidate image descriptor"
+else
+    fail "release acceptance does not bind the expected tag to the candidate image"
+fi
+
+descriptor_wait_body="$(sed -n '/^wait_for_candidate_controller_descriptor()/,/^}/p' "$ACCEPTANCE")"
+authenticated_wait_body="$(sed -n '/^wait_for_authenticated_capabilities()/,/^}/p' "$PROBE_LIBRARY")"
+descriptor_runtime_body="$(sed -n '/^assert_candidate_runtime_clean()/,/^}/p' "$ACCEPTANCE")"
+probe_runtime_body="$(sed -n '/^assert_probe_candidate_runtime_clean()/,/^}/p' "$PROBE_LIBRARY")"
+api_request_body="$(sed -n '/^api_request()/,/^}/p' "$PROBE_LIBRARY")"
+tls_wait_body="$(sed -n '/^wait_for_controller_tls_listener()/,/^}/p' "$ACCEPTANCE")"
+mapfile -t descriptor_load_lines < <(
+    grep -n 'load_candidate_controller_descriptor' <<<"$descriptor_wait_body" | cut -d: -f1
+)
+mapfile -t descriptor_runtime_lines < <(
+    grep -n 'assert_candidate_runtime_clean' <<<"$descriptor_wait_body" | cut -d: -f1
+)
+descriptor_return_line="$(grep -n 'return 0' <<<"$descriptor_wait_body" | head -1 | cut -d: -f1)"
+authenticated_runtime_line="$(grep -n 'assert_probe_candidate_runtime_clean' \
+    <<<"$authenticated_wait_body" | head -1 | cut -d: -f1)"
+authenticated_return_line="$(grep -n 'return 0' <<<"$authenticated_wait_body" | head -1 | cut -d: -f1)"
+if [[ "$tls_wait_body" != *'docker exec'* ]] \
+   && [[ "$authenticated_wait_body" != *'docker exec'* \
+      && "$api_request_body" != *'docker exec'* \
+      && "$probe_runtime_body" != *'docker exec'* ]] \
+   && grep -Fq -- '-connect "127.0.0.1:${HOST_PORT_443}"' <<<"$tls_wait_body" \
+   && grep -Fq '.[0].RestartCount == 0' <<<"$tls_wait_body" \
+   && grep -Fq '.[0].State.Running == true' <<<"$descriptor_runtime_body" \
+   && grep -Fq '.[0].State.Pid > 0' <<<"$descriptor_runtime_body" \
+   && grep -Fq '.[0].RestartCount == 0' <<<"$descriptor_runtime_body" \
+   && grep -Fq '.[0].State.Running == true' <<<"$probe_runtime_body" \
+   && grep -Fq '.[0].State.Pid > 0' <<<"$probe_runtime_body" \
+   && grep -Fq '.[0].RestartCount == 0' <<<"$probe_runtime_body" \
+   && [[ "${#descriptor_load_lines[@]}" == 2 \
+      && "${#descriptor_runtime_lines[@]}" == 3 \
+      && "$descriptor_return_line" =~ ^[0-9]+$ \
+      && "${descriptor_load_lines[0]:-0}" -lt "${descriptor_runtime_lines[1]:-0}" \
+      && "${descriptor_runtime_lines[1]:-0}" -lt "$descriptor_return_line" \
+      && "${descriptor_load_lines[1]:-0}" -lt "${descriptor_runtime_lines[2]:-0}" ]] \
+   && [[ "$authenticated_runtime_line" =~ ^[0-9]+$ \
+      && "$authenticated_return_line" =~ ^[0-9]+$ \
+      && "$authenticated_runtime_line" -lt "$authenticated_return_line" ]]; then
+    pass "descriptor and authentication readiness reject candidates that restarted"
+else
+    fail "candidate readiness can hide a failed start behind Docker restart policy"
 fi
 
 immutable_line="$(grep -nF -- '- name: Publish and verify immutable release' "$RELEASE" | cut -d: -f1)"
@@ -401,6 +604,16 @@ for doc in README.md README.en.md docs/architecture.md docs/docker.md MEMORY.md 
         fail "$doc omits the Docker delivery contract"
     fi
 done
+
+if grep -Fq 'ghcr.io/moooyo/5gpn:${TAG}@${IMAGE_DIGEST}' "$ROOT/README.md" \
+   && grep -Fq 'ghcr.io/moooyo/5gpn:${TAG}@${IMAGE_DIGEST}' "$ROOT/README.en.md" \
+   && grep -Fq 'ghcr.io/moooyo/5gpn:${TAG}@${IMAGE_DIGEST}' "$ROOT/docs/docker.md" \
+   && grep -Fq 'tag-and-digest container image reference recorded by the immutable release' \
+        "$ROOT/docs/architecture.md"; then
+    pass "Docker deployment documentation consumes the immutable release image reference"
+else
+    fail "Docker deployment documentation falls back to an unqualified image tag"
+fi
 
 ENTRYPOINT="$ROOT/docker/entrypoint.sh"
 PUBLIC_CERT="$ROOT/docker/docker-public-cert.sh"

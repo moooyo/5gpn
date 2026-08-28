@@ -1,6 +1,6 @@
 services:
   gateway:
-    image: ${FIVEGPN_IMAGE:?set FIVEGPN_IMAGE to an exact ghcr.io/moooyo/5gpn tag}
+    image: ${FIVEGPN_IMAGE:?set FIVEGPN_IMAGE to the exact ghcr.io/moooyo/5gpn tag@sha256:REPLACE_WITH_RELEASE_MANIFEST_DIGEST reference from the GitHub Release body}
     user: "10001:10001"
     environment:
       FIVEGPN_RUNTIME: container

@@ -32,6 +32,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Classify tag and verify branch provenance
         id: release
@@ -129,11 +130,12 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - name: Revalidate immutable release identity
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           RELEASE_CHANNEL: ${{ needs.classify.outputs.channel }}
           REQUIRED_BRANCH: ${{ needs.classify.outputs.required_branch }}
         run: |
@@ -191,6 +193,9 @@ jobs:
       # No Go or Node toolchain is set up here. The runtime and Console are
       # built in their own repositories; this job packages installer inputs and
       # assembles their already-published, digest-pinned artifacts into OCI.
+      # Checkout credentials are not persisted, and the build step receives no
+      # repository token. Write credentials are exposed only to the later steps
+      # that authenticate to GHCR or call the GitHub release API.
 
       # The bundle contains every first-party host-installer input plus the
       # Docker launch files, their runbook, and the versioned test-env acceptance

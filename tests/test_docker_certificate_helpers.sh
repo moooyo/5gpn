@@ -328,6 +328,43 @@ EOF
     publish_roles || fail "idempotent public role publication failed"
     [[ "$_ROLES_CHANGED" == 0 ]] || fail "unchanged lineage needlessly republished role generations"
 
+    # Make only the time-validity predicate fail. This deterministically models
+    # an expired but otherwise intact committed lineage without depending on the
+    # test host clock or carrying a frozen private-key fixture.
+    SIMULATE_CERT_EXPIRY=1
+    openssl() {
+        local argument previous=""
+        if [[ "$SIMULATE_CERT_EXPIRY" == 1 && "${1:-}" == x509 ]]; then
+            for argument in "$@"; do
+                if [[ "$previous" == -checkend && "$argument" == 0 ]]; then
+                    return 1
+                fi
+                previous="$argument"
+            done
+        fi
+        command openssl "$@"
+    }
+    expired_before="$(lineage_tree_fingerprint)"
+    ready_lineage_is_recoverable_read_only \
+        || fail "expired committed lineage was not structurally recoverable at preflight"
+    expired_after="$(lineage_tree_fingerprint)"
+    [[ "$expired_after" == "$expired_before" ]] \
+        || fail "expired committed lineage preflight mutated Certbot state"
+    if live_lineage_safe; then
+        fail "expired committed lineage was treated as currently serviceable"
+    fi
+    ensure_layout() { return 0; }
+    BOOTSTRAP_FORCE_SEEN=""
+    run_certbot_bootstrap() {
+        BOOTSTRAP_FORCE_SEEN="$1"
+        SIMULATE_CERT_EXPIRY=0
+    }
+    bootstrap_public_certificate >/dev/null \
+        || fail "expired committed lineage did not reach bootstrap renewal"
+    [[ "$BOOTSTRAP_FORCE_SEEN" == 1 ]] \
+        || fail "expired committed lineage bootstrap did not force renewal"
+    unset -f openssl
+
     ensure_layout() { return 0; }
     credential_safe() { return 0; }
     lineage_set_is_exclusive() { return 0; }

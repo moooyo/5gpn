@@ -476,17 +476,31 @@ certificate_sans_are_exact() {
     [[ "$dns_sans" == "$expected" ]]
 }
 
-validate_role_pair() {
-    local cert="$1" key="$2" check_seconds="${3:-0}"
+role_pair_is_structurally_safe() {
+    local cert="$1" key="$2"
     [[ -s "$cert" && -s "$key" ]] || return 1
-    openssl x509 -in "$cert" -noout -checkend "$check_seconds" >/dev/null 2>&1 \
+    openssl x509 -in "$cert" -noout >/dev/null 2>&1 \
         && certificate_sans_are_exact "$cert" \
         && keypair_matches "$cert" "$key"
 }
 
-validate_live_cert_pair() {
+role_pair_is_currently_serviceable() {
+    local cert="$1" key="$2" check_seconds="${3:-0}"
+    role_pair_is_structurally_safe "$cert" "$key" \
+        && openssl x509 -in "$cert" -noout -checkend "$check_seconds" >/dev/null 2>&1
+}
+
+live_cert_pair_is_structurally_safe() {
+    local live="$1"
+    role_pair_is_structurally_safe "$live/fullchain.pem" "$live/privkey.pem" \
+        && cert_chain_structurally_trusted "$live/cert.pem" "$live/chain.pem"
+}
+
+live_cert_pair_is_currently_serviceable() {
     local live="$1" check_seconds="${2:-0}"
-    validate_role_pair "$live/fullchain.pem" "$live/privkey.pem" "$check_seconds" \
+    live_cert_pair_is_structurally_safe "$live" \
+        && openssl x509 -in "$live/fullchain.pem" -noout \
+            -checkend "$check_seconds" >/dev/null 2>&1 \
         && cert_chain_trusted "$live/cert.pem" "$live/chain.pem"
 }
 
@@ -502,8 +516,8 @@ archive_generation_structurally_safe() {
         | sha256sum)" || return 1
     fullchain_digest="$(sha256sum "$archive/fullchain${number}.pem")" || return 1
     [[ "${combined_digest%% *}" == "${fullchain_digest%% *}" ]] \
-        && certificate_sans_are_exact "$archive/cert${number}.pem" \
-        && keypair_matches "$archive/cert${number}.pem" "$archive/privkey${number}.pem" \
+        && role_pair_is_structurally_safe "$archive/cert${number}.pem" \
+            "$archive/privkey${number}.pem" \
         && cert_chain_structurally_trusted "$archive/cert${number}.pem" \
             "$archive/chain${number}.pem"
 }
@@ -672,7 +686,8 @@ ready_lineage_is_recoverable_read_only() {
         (( 10#$generation > best )) && best=$((10#$generation))
     done
     (( best > 0 )) || return 1
-    validate_role_pair "$archive/fullchain${best}.pem" "$archive/privkey${best}.pem" 0 \
+    role_pair_is_structurally_safe "$archive/fullchain${best}.pem" \
+        "$archive/privkey${best}.pem" \
         && cert_chain_structurally_trusted "$archive/cert${best}.pem" "$archive/chain${best}.pem" \
         || return 1
     if [[ -e "$live" || -L "$live" ]]; then
@@ -772,7 +787,7 @@ live_lineage_safe() {
         && renewal_conf_safe \
         && recover_live_lineage \
         && archive_lineage_safe \
-        && validate_live_cert_pair "$live" 0
+        && live_cert_pair_is_currently_serviceable "$live" 0
 }
 
 lineage_artifacts_exist() {
@@ -815,10 +830,7 @@ lineage_structure_safe() {
         && renewal_conf_safe \
         && recover_live_lineage \
         && archive_lineage_safe \
-        && openssl x509 -in "$live/fullchain.pem" -noout >/dev/null 2>&1 \
-        && certificate_sans_are_exact "$live/fullchain.pem" \
-        && keypair_matches "$live/fullchain.pem" "$live/privkey.pem" \
-        && cert_chain_structurally_trusted "$live/cert.pem" "$live/chain.pem"
+        && live_cert_pair_is_structurally_safe "$live"
 }
 
 roles_match_live() {
@@ -884,13 +896,13 @@ load_cert_role_helpers() {
 validate_shared_role_candidate() {
     local cert="$1" key="$2" role="$3"
     [[ "$role" == dot || "$role" == console ]] \
-        && validate_role_pair "$cert" "$key" 0
+        && role_pair_is_currently_serviceable "$cert" "$key" 0
 }
 
 publish_roles() {
     local live="$LE_LIVE_ROOT/$BASE_DOMAIN"
     _ROLES_CHANGED=0
-    validate_live_cert_pair "$live" 0 || return 1
+    live_cert_pair_is_currently_serviceable "$live" 0 || return 1
     load_cert_role_helpers || return 1
     cert_role_ctl_tree_is_recoverable \
         && cert_role_ctl_repair_recoverable_tree \

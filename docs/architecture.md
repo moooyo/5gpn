@@ -111,6 +111,15 @@ change with the new generation; this is an explicit stable-URL compatibility
 assumption, not a promise that arbitrary top-level content stays byte-identical.
 After a durable current switch, garbage collection keeps only current and
 previous; GC failure is a warning and never rolls back the committed pointer.
+Before removing any other formal generation, GC re-reads the current and
+previous protection set, atomically renames the generation to a same-directory
+`.delete.<pid>.<random>` tombstone, and syncs `generations/`. It then removes
+only individually revalidated plain entries. The ownership marker stays until
+the content removals are durable, and both the marker removal and final
+tombstone removal have their own directory fences. A later claim or current
+preflight resumes only a strictly valid partial or empty tombstone; interrupted
+GC can therefore never leave a half-deleted directory with a formal generation
+name.
 
 The Docker form uses the same stable-root, generation, manifest, profile, and
 relative-`current` shape in its separate persistent `fivegpn-ui` volume.
@@ -123,7 +132,7 @@ requests to `/upgrade` and `/upgrade/ui` fail with HTTP 403, and the Console
 contains no check, automatic action, or manual action for them. `/configs/geo`
 remains an independent maintenance action. Core and Console versions move only
 through a digest-pinned 5gpn release: the host installer bundle or the matching
-container image tag.
+tag-and-digest container image reference recorded by the immutable release.
 
 The host/systemd installation retains two root oneshots, and only because they
 hold key material a network-facing process must not:
@@ -382,7 +391,7 @@ on Debian or Ubuntu is the validated host MAC path. The worker startup probe is
 still authoritative: a platform that appears to meet the list but cannot
 create the exact bounded sibling hierarchy fails before DoT or the controller
 opens. A GitHub-hosted image build and static container smoke cannot prove this
-runtime property; the release gate includes a real Engine 28/cgroup-v2
+runtime property; release readiness requires a real Engine 28/cgroup-v2
 acceptance run on a disposable target reached through `test-env`. The working
 gateway's read-only deployment authorization does not authorize container
 recreation, OOM injection, certificate mutation, or other Docker acceptance
@@ -416,6 +425,13 @@ it is never silently reset. Public-role generation collection first renames a
 candidate to `.delete.<pid>.<random>` in the same role directory and removes only
 that tombstone, so an interrupted deletion cannot make a live generation
 ambiguous.
+
+Docker preflight separates structural recoverability from current
+serviceability. A committed lineage whose files, exact SAN set, keypair,
+no-check-time chain, and renewal configuration are intact remains recoverable
+even after expiry, so bootstrap can enter its existing forced-renewal path.
+Serving or publishing a role still requires the certificate to be currently
+valid and trusted; missing or mismatched material remains a hard refusal.
 
 ## Listeners
 
@@ -781,6 +797,14 @@ sign only the current request, recheck the fence before every publication
 boundary, fsync the certificate and key, and commit a hash-bound ready or error
 result last. A stale A or B attempt can never overwrite a newer C request.
 
+The host installer's first interception root uses the same durability rule
+before any profile can distribute it. The candidate key and certificate are
+validated and fsynced under their candidate names, the directory is synced,
+and only then are they promoted key-first to `root.key` and `root.crt` followed
+by a final directory sync. Recovery preserves any complete valid live root,
+can finish only a matching candidate or key-first partial pair, and never
+replaces an already visible trust root with unrelated candidate bytes.
+
 The runtime treats the result as data, not as a second configuration document.
 It derives one immutable interception plan from the committed Config, the fixed
 client boundary, live egress groups and the current certificate generation. A
@@ -1024,6 +1048,13 @@ lock is the only concurrent-writer contract for this file: one invocation reads
 a single inode snapshot, binds publication to that revision, and checks it again
 immediately before rename. Manual root edits that do not take the installer lock
 must not run concurrently with install, reinstall, reset, or configure.
+On full install, a missing Cloudflare credential is collected only after the
+complete candidate and operator YAML agree and remains process-memory-only
+through dependency installation and the final certificate-source recheck. It
+is written only after both installer locks are held, publication has explicitly
+started, and the project roots have been claimed. A pre-publication failure
+therefore cannot leave a live credential behind while reporting that no 5gpn
+publication ran.
 Historical `policy.json`, `upstreams.json`,
 `ecs.json`, `subscriptions.json`, `stats.json`, `/etc/5gpn/rules`, and sidecar
 documents are unsupported legacy footprints. The monolith never reads them,
@@ -1177,6 +1208,16 @@ live/archive paths all match the requested mode. No Certbot issuance occurs on
 that path. A mismatched current base, mode, source, or ownership record cannot
 authorize reuse.
 
+Every provenance replacement fsyncs its candidate before rename and the
+certificate root afterwards. A post-rename sync failure is reported as a
+visible `committed-undurable` change, so configure cannot restore the runtime
+across an uncertain certificate-source commit. During an owned base switch,
+the distro-timer exclusivity check accepts only the selected candidate plus
+canonical lineages named by one stable, metadata-and-digest-bound snapshot of
+`.certbot-ownership`. Any external, malformed, duplicate-suffix, or unknown
+entry still blocks takeover. Older owned lineages remain dormant: the scoped
+timer derives exactly one renewal target from the current `dns.env` base.
+
 A canonical lineage with no matching ownership record remains external. It may
 be selected only through the same strict certificate and renewal fingerprint,
 is copied through the common role publisher, and never gains deletion or
@@ -1279,7 +1320,11 @@ authorization. After the installer crosses its declared publication boundary
 and before deleting a proven current identity, it durably records the old
 numeric IDs; after an interruption, the next run resumes from that journal,
 recreates the system identity, and reconciles only validated managed roots
-before clearing it. Even when the crash happened
+before clearing it. Before journal removal, the installer revalidates every
+present managed root, deduplicates them by filesystem device, performs a
+non-ignored `sync -f` for each filesystem, and scans again for every replaced
+UID/GID. A path, stat, sync, or final-scan failure retains the journal. Even
+when the crash happened
 after account deletion, safe current marker or unit provenance must still be
 present, the current journal must validate, and the recorded system-range IDs
 must remain unclaimed by any other identity; an exact surviving `fivegpn` group
@@ -1353,9 +1398,10 @@ input. A real gateway reachable as `test-env` may be used only for the
 read-only deployment class; all mutating and fault-injection work uses a
 disposable target.
 
-Docker adds one release gate without weakening that safety split. Hosted CI may
-prepare the bound components, build the `linux/amd64` image, and inspect static
-contents, but it cannot prove writable cgroup delegation. The exact candidate
+Docker adds one release-readiness obligation without weakening that safety
+split. Hosted CI may prepare the bound components, build the `linux/amd64`
+image, and inspect static contents, but it cannot prove writable cgroup
+delegation. The exact candidate
 therefore runs on a disposable Engine 28, cgroup-v2 target reached through
 `test-env`, never on the working gateway. That acceptance covers the real
 startup probe, an extension worker operation, worker OOM containment,
@@ -1370,10 +1416,9 @@ satisfiable in one paste by the same person who would skip the run. No
 hosted-runner fallback or historical development result substitutes for
 actually running acceptance.
 
-The merged root implementation requires runtime-v2, and `release/pins.env` now
-records a pair that provides it: the pinned Core answers the handshake and the
-pinned Console carries the deployment-neutral setup wording, both as immutable
-published releases. Release-mode acceptance first passed on 2026-08-22, against
-a real Cloudflare zone; before that it had never run, and the first attempt
-proved that three of this repository's own lineage assertions rejected a
-correctly issued certificate.
+Every release candidate requires runtime-v2. Its pinned Core must answer the
+offline handshake and its pinned Console must carry the deployment-neutral
+setup wording, both as immutable published releases. This compatibility check
+is not acceptance evidence. A release-mode run belongs only to its exact
+commit, tag, pin manifest, image ID, and probe bundle, and no historical run
+carries forward after any of those inputs changes.

@@ -4,26 +4,27 @@ Docker is an alternative packaging and lifecycle for the same 5gpn monolith.
 It is one image, one container, and one Compose service. DNS, forwarding,
 Console, Telegram, and native extensions are not split into sidecars.
 
-## Publication status
+## Publication contract
 
-The merged root implementation requires the exact offline Core handshake
-`5gpn-container-runtime-v2`. `release/pins.env` now names a container-capable
-pair that satisfies it: the pinned Core's published binary answers the
+Every release image requires the exact offline Core handshake
+`5gpn-container-runtime-v2`. Its tagged `release/pins.env` must name a
+container-capable pair: the pinned Core's published binary answers the
 handshake, and the pinned Console carries the deployment-neutral setup wording.
-Both are immutable published releases and their digests are bound in the pin
-manifest. `release/pins.env` and `THIRD_PARTY_NOTICES.md` are the only places
-that name the exact coordinates.
+Both inputs must be immutable published releases with their digests bound in
+the pin manifest. `release/pins.env` and `THIRD_PARTY_NOTICES.md` are the only
+places that name the exact coordinates.
 
-Release-mode acceptance first passed on 2026-08-22. Publication is not gated on
-a record of that run -- the release job binds to the image it builds and pushes,
-not to a hand-set variable -- so running acceptance against the exact candidate
-before tagging is a maintainer's obligation, and nothing downstream will catch
-skipping it.
+Publication is not gated on a record of release-mode acceptance. The release job
+binds to the image it builds and pushes, not to a hand-set variable, so running
+acceptance against the exact candidate before tagging is a maintainer's
+obligation and nothing downstream will catch skipping it. Historical evidence
+for another commit, tag, pin manifest, image ID, or probe bundle does not carry
+forward.
 
 Do not weaken the handshake or use a development binary in a release image.
-This runbook describes the v2 delivery that becomes usable only after the exact
-image passes release-mode acceptance against the pinned pair already recorded
-in `release/pins.env`.
+This runbook describes the v2 delivery. For availability, use the immutable
+GitHub Release record; a matching image is identified by the complete
+`tag@sha256` reference in its `OCI image:` line.
 
 ## Supported host
 
@@ -136,16 +137,18 @@ file, and both reject a line that carries leading or trailing spaces.
 
 ## Start
 
-After a v2-compatible tag has been published, confirm the host boundary and use
-the exact image tag matching the release bundle. Compose requires
-`FIVEGPN_IMAGE` and has no movable default. Stable publication may update the
-convenience alias `latest`; beta never does.
+For a published v2-compatible Release, confirm the host boundary and use the
+complete `tag@sha256` image reference recorded in the Release body. Compose
+requires `FIVEGPN_IMAGE` and has no movable default. Stable publication may
+update the convenience alias `latest`; beta never does, and deployments do not
+use that alias.
 
 ```bash
 docker version --format '{{.Server.Version}}'
 docker info --format 'cgroup={{.CgroupVersion}} driver={{.CgroupDriver}}'
 
-export FIVEGPN_IMAGE="ghcr.io/moooyo/5gpn:${TAG}"
+IMAGE_DIGEST=sha256:REPLACE_WITH_RELEASE_MANIFEST_DIGEST
+export FIVEGPN_IMAGE="ghcr.io/moooyo/5gpn:${TAG}@${IMAGE_DIGEST}"
 docker compose pull gateway
 docker compose up -d gateway
 docker compose logs -f gateway
@@ -298,7 +301,8 @@ startup fails if that isolation cannot be established.
 
 ## Update a v2 deployment
 
-Set `FIVEGPN_IMAGE` to the new exact tag and run `pull` followed by `up -d`.
+Set `FIVEGPN_IMAGE` to the new complete `tag@sha256` reference from the GitHub
+Release body and run `pull` followed by `up -d`.
 Keep both volume names unchanged. Back up both volumes while the gateway is
 stopped. After changing the Cloudflare token file, recreate or restart the
 gateway so bootstrap copies the new credential into tmpfs. Certificate renewal,
@@ -337,7 +341,8 @@ Decide the tag before acceptance, and re-run acceptance after any commit that
 moves the candidate, however unrelated the change looks.
 
 ```bash
-image_id="$(bash docker/build-candidate-image.sh --tag X.Y.Z)"
+accepted_release_tag=X.Y.Z
+image_id="$(bash docker/build-candidate-image.sh --tag "$accepted_release_tag")"
 echo "$image_id"
 ```
 
@@ -361,9 +366,13 @@ driver also requires:
 
 - zero installed extensions on the candidate;
 - a system-trusted public lineage the candidate already holds, or
-  `FIVEGPN_CONTROLLER_CA_FILE` pointing at a PEM bundle that verifies it;
-- `FIVEGPN_CONTROLLER_SECRET_FILE` as a single-link mode-0600 regular file of
-  at most 4096 bytes holding one 16-to-512-character token.
+  `FIVEGPN_CONTROLLER_CA_FILE` pointing at a PEM bundle that verifies it.
+
+The driver derives `console.<base>` from the candidate's `dns.env` and reads
+the Controller secret only through the candidate Core's owner-scoped inspector.
+Before sending that secret, it verifies that the loopback-published HTTPS port
+serves the candidate's current Console leaf and pins every API request to that
+leaf's public key.
 
 The run is mutating: it stops, renames, and re-creates the named container,
 rolling back on failure.
@@ -372,6 +381,7 @@ rolling back on failure.
 
 ```bash
 accepted_commit="$(git rev-parse HEAD)"
+accepted_release_tag=X.Y.Z
 accepted_mihomo_sha="$(sed -n 's/^MIHOMO_SHA256=//p' release/pins.env)"
 accepted_container=fivegpn-gateway   # the candidate container's actual name
 evidence="container-acceptance-${accepted_commit}.log"
@@ -380,9 +390,8 @@ set -o pipefail
 FIVEGPN_ACCEPTANCE_HOST=test-env \
 FIVEGPN_ACCEPTANCE_TARGET=disposable \
 FIVEGPN_EXPECTED_COMMIT="$accepted_commit" \
+FIVEGPN_EXPECTED_RELEASE_TAG="$accepted_release_tag" \
 FIVEGPN_EXPECTED_MIHOMO_SHA256="$accepted_mihomo_sha" \
-FIVEGPN_CAPABILITIES_URL=https://console.example.com/capabilities \
-FIVEGPN_CONTROLLER_SECRET_FILE=/root/acceptance/controller-secret \
   bash tests/container-acceptance.sh "$accepted_container" \
   | tee "$evidence"
 ```
@@ -394,8 +403,8 @@ every versioned acceptance input against `git show HEAD:<path>`.
 
 Development mode rehearses the same probes without producing release evidence.
 It remaps the published ports to loopback highports so it can coexist with a
-host gateway, and it deliberately emits differently named variables that the
-release gate will not accept. It takes
+host gateway, and it deliberately emits differently named evidence that the
+release-mode acceptance driver does not accept. It takes
 `FIVEGPN_EXPECTED_MIHOMO_BINARY_SHA256` — the digest of a locally built binary
 — instead of `FIVEGPN_EXPECTED_MIHOMO_SHA256`, which must be absent.
 
@@ -408,17 +417,16 @@ FIVEGPN_EXPECTED_MIHOMO_BINARY_SHA256=<64-hex> \
 FIVEGPN_DEVELOPMENT_PROJECT=<safe test project name> \
 FIVEGPN_DEVELOPMENT_BIND_IP=127.0.0.1 \
 FIVEGPN_DEVELOPMENT_HOST_PORTS='{"853":2853,"80":20080,"443":20443,"8080":28080,"8443":28443}' \
-FIVEGPN_CAPABILITIES_URL=https://console.example.com:20443/capabilities \
-FIVEGPN_CONTROLLER_SECRET_FILE=/root/acceptance/controller-secret \
   bash tests/container-acceptance.sh <container>
 ```
 
 ### Record the evidence
 
-The run prints the accepted commit, the candidate image ID, the pinned Core
-digest, and the probe-bundle digest. Nothing consumes them: record them where
-humans read, so a later reader can tell which image and which probes a given
-tag was accepted against.
+The run prints a candidate descriptor containing the accepted commit, release
+tag, exact image config digest, and platform, together with the pinned Core
+digest and probe-bundle digest. Nothing consumes them: record them where humans
+read, so a later reader can tell which image and which probes a given tag was
+accepted against.
 
 Publication itself is bound to the image the release job builds and pushes, and
 the pushed manifest is verified against those exact bytes. Stable `latest` moves
