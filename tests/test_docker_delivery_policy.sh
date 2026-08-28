@@ -450,6 +450,7 @@ if [[ "$certificate_idle_call_line" =~ ^[0-9]+$ \
    && "$extension_review_line" =~ ^[0-9]+$ \
    && "$certificate_idle_call_line" -lt "$extension_review_line" ]] \
    && grep -Fq '/run/5gpn/cert-renew.lock' "$EXTENSION_PROBE" \
+   && grep -Fq 'if docker exec --user 10001:10001' <<<"$certificate_idle_body" \
    && grep -Fq 'docker exec --user 10001:10001' <<<"$certificate_idle_body" \
    && grep -Fq 'readlink -f -- "$runtime"' <<<"$certificate_idle_body" \
    && grep -Fq '10001:10001:700' <<<"$certificate_idle_body" \

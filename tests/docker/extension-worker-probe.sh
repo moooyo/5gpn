@@ -43,8 +43,7 @@ wait_for_certificate_manager_idle() {
     while (( SECONDS < deadline )); do
         assert_probe_candidate_runtime_clean \
             || probe_die 'candidate stopped or restarted while the certificate manager was settling'
-        set +e
-        docker exec --user 10001:10001 "$FIVEGPN_PROBE_CONTAINER" \
+        if docker exec --user 10001:10001 "$FIVEGPN_PROBE_CONTAINER" \
             /bin/bash -euo pipefail -c '
           runtime="$1"
           lock="$2"
@@ -59,9 +58,11 @@ wait_for_certificate_manager_idle() {
           fd_identity="$(stat -Lc "%d:%i" -- "/proc/${BASHPID}/fd/9")" || exit 74
           [[ "$fd_identity" == "$path_identity" ]] || exit 74
           flock -n -E 75 9
-        ' _ /run/5gpn "$certificate_lock" >/dev/null 2>&1
-        rc=$?
-        set -e
+        ' _ /run/5gpn "$certificate_lock" >/dev/null 2>&1; then
+            rc=0
+        else
+            rc=$?
+        fi
         case "$rc" in
             0)
                 stable=$((stable + 1))
