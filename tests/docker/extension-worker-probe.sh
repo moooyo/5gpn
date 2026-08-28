@@ -39,19 +39,27 @@ oom_request_pid=''
 chmod 0600 "$oom_status_file" "$intercept_ca_file"
 
 wait_for_certificate_manager_idle() {
-    local rc stable=0 checks=0 deadline=$((SECONDS + 33 * 60))
+    local rc stable=0 deadline=$((SECONDS + 35 * 60))
     while (( SECONDS < deadline )); do
+        assert_probe_candidate_runtime_clean \
+            || probe_die 'candidate stopped or restarted while the certificate manager was settling'
         set +e
-        docker exec "$FIVEGPN_PROBE_CONTAINER" /bin/bash -euo pipefail -c '
-          lock="$1"
-          if [[ ! -e "$lock" && ! -L "$lock" ]]; then
-            exit 2
-          fi
-          [[ -f "$lock" && ! -L "$lock" ]] || exit 3
-          [[ "$(stat -Lc "%u:%g:%a:%h" -- "$lock")" == "10001:10001:600:1" ]] || exit 3
+        docker exec --user 10001:10001 "$FIVEGPN_PROBE_CONTAINER" \
+            /bin/bash -euo pipefail -c '
+          runtime="$1"
+          lock="$2"
+          [[ -d "$runtime" && ! -L "$runtime" ]] || exit 74
+          [[ "$(readlink -f -- "$runtime")" == "$runtime" ]] || exit 74
+          [[ "$(stat -Lc "%u:%g:%a" -- "$runtime")" == "10001:10001:700" ]] || exit 74
+          [[ -e "$lock" && ! -L "$lock" ]] || exit 74
+          [[ -f "$lock" ]] || exit 74
+          [[ "$(stat -Lc "%u:%g:%a:%h" -- "$lock")" == "10001:10001:600:1" ]] || exit 74
+          path_identity="$(stat -Lc "%d:%i" -- "$lock")" || exit 74
           exec 9<"$lock"
-          flock -n 9
-        ' _ "$certificate_lock" >/dev/null 2>&1
+          fd_identity="$(stat -Lc "%d:%i" -- "/proc/${BASHPID}/fd/9")" || exit 74
+          [[ "$fd_identity" == "$path_identity" ]] || exit 74
+          flock -n -E 75 9
+        ' _ /run/5gpn "$certificate_lock" >/dev/null 2>&1
         rc=$?
         set -e
         case "$rc" in
@@ -63,15 +71,10 @@ wait_for_certificate_manager_idle() {
                     return 0
                 fi
                 ;;
-            1|2) stable=0 ;;
-            3) probe_die 'container certificate lock metadata is unsafe' ;;
+            75) stable=0 ;;
+            74) probe_die 'container certificate lock boundary is missing or unsafe' ;;
             *) probe_die "could not inspect the container certificate lock (status $rc)" ;;
         esac
-        checks=$((checks + 1))
-        if (( checks % 40 == 0 )); then
-            assert_probe_candidate_runtime_clean \
-                || probe_die 'candidate stopped or restarted while the certificate manager was settling'
-        fi
         sleep 0.25
     done
     probe_die 'container certificate manager did not become stably idle after startup'

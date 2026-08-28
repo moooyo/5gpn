@@ -450,11 +450,24 @@ if [[ "$certificate_idle_call_line" =~ ^[0-9]+$ \
    && "$extension_review_line" =~ ^[0-9]+$ \
    && "$certificate_idle_call_line" -lt "$extension_review_line" ]] \
    && grep -Fq '/run/5gpn/cert-renew.lock' "$EXTENSION_PROBE" \
+   && grep -Fq 'docker exec --user 10001:10001' <<<"$certificate_idle_body" \
+   && grep -Fq 'readlink -f -- "$runtime"' <<<"$certificate_idle_body" \
+   && grep -Fq '10001:10001:700' <<<"$certificate_idle_body" \
    && grep -Fq 'stat -Lc "%u:%g:%a:%h"' <<<"$certificate_idle_body" \
    && grep -Fq '10001:10001:600:1' <<<"$certificate_idle_body" \
-   && grep -Fq 'flock -n 9' <<<"$certificate_idle_body" \
+   && grep -Fq 'path_identity="$(stat -Lc "%d:%i" -- "$lock")"' \
+        <<<"$certificate_idle_body" \
+   && grep -Fq 'fd_identity="$(stat -Lc "%d:%i" -- "/proc/${BASHPID}/fd/9")"' \
+        <<<"$certificate_idle_body" \
+   && grep -Fq '[[ "$fd_identity" == "$path_identity" ]] || exit 74' \
+        <<<"$certificate_idle_body" \
+   && grep -Fq '[[ -e "$lock" && ! -L "$lock" ]] || exit 74' \
+        <<<"$certificate_idle_body" \
+   && grep -Fq 'flock -n -E 75 9' <<<"$certificate_idle_body" \
+   && grep -Fq '75) stable=0' <<<"$certificate_idle_body" \
    && grep -Fq 'stable >= 8' <<<"$certificate_idle_body" \
-   && grep -Fq '33 * 60' <<<"$certificate_idle_body" \
+   && grep -Fq 'sleep 0.25' <<<"$certificate_idle_body" \
+   && grep -Fq '35 * 60' <<<"$certificate_idle_body" \
    && grep -Fq 'assert_probe_candidate_runtime_clean' <<<"$certificate_idle_body"; then
     pass "extension acceptance waits for a stably idle certificate manager"
 else
