@@ -71,7 +71,11 @@ wait_for_certificate_manager_idle() {
                     return 0
                 fi
                 ;;
-            75) stable=0 ;;
+            75)
+                stable=0
+                sleep 1
+                continue
+                ;;
             74) probe_die 'container certificate lock boundary is missing or unsafe' ;;
             *) probe_die "could not inspect the container certificate lock (status $rc)" ;;
         esac

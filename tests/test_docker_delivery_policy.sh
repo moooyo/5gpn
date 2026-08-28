@@ -464,7 +464,8 @@ if [[ "$certificate_idle_call_line" =~ ^[0-9]+$ \
    && grep -Fq '[[ -e "$lock" && ! -L "$lock" ]] || exit 74' \
         <<<"$certificate_idle_body" \
    && grep -Fq 'flock -n -E 75 9' <<<"$certificate_idle_body" \
-   && grep -Fq '75) stable=0' <<<"$certificate_idle_body" \
+   && grep -Fq '75)' <<<"$certificate_idle_body" \
+   && grep -Fq 'sleep 1' <<<"$certificate_idle_body" \
    && grep -Fq 'stable >= 8' <<<"$certificate_idle_body" \
    && grep -Fq 'sleep 0.25' <<<"$certificate_idle_body" \
    && grep -Fq '35 * 60' <<<"$certificate_idle_body" \
