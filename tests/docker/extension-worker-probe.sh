@@ -26,6 +26,7 @@ extension_id="acceptance.docker.${run_id}"
 capture_host="docker-${run_id}.acceptance.example"
 request_file=/etc/5gpn/mihomo/5gpn/certificate-request
 state_file=/etc/5gpn/intercept/cert-state
+certificate_lock=/run/5gpn/cert-renew.lock
 installed=false
 install_attempted=false
 candidate_digest=''
@@ -36,6 +37,48 @@ oom_status_file="$(mktemp /tmp/5gpn-docker-oom-status.XXXXXX)"
 intercept_ca_file="$(mktemp /tmp/5gpn-docker-intercept-ca.XXXXXX)"
 oom_request_pid=''
 chmod 0600 "$oom_status_file" "$intercept_ca_file"
+
+wait_for_certificate_manager_idle() {
+    local rc stable=0 deadline=$((SECONDS + 35 * 60))
+    while (( SECONDS < deadline )); do
+        assert_probe_candidate_runtime_clean \
+            || probe_die 'candidate stopped or restarted while the certificate manager was settling'
+        set +e
+        docker exec --user 10001:10001 "$FIVEGPN_PROBE_CONTAINER" \
+            /bin/bash -euo pipefail -c '
+          runtime="$1"
+          lock="$2"
+          [[ -d "$runtime" && ! -L "$runtime" ]] || exit 74
+          [[ "$(readlink -f -- "$runtime")" == "$runtime" ]] || exit 74
+          [[ "$(stat -Lc "%u:%g:%a" -- "$runtime")" == "10001:10001:700" ]] || exit 74
+          [[ -e "$lock" && ! -L "$lock" ]] || exit 74
+          [[ -f "$lock" ]] || exit 74
+          [[ "$(stat -Lc "%u:%g:%a:%h" -- "$lock")" == "10001:10001:600:1" ]] || exit 74
+          path_identity="$(stat -Lc "%d:%i" -- "$lock")" || exit 74
+          exec 9<"$lock"
+          fd_identity="$(stat -Lc "%d:%i" -- "/proc/${BASHPID}/fd/9")" || exit 74
+          [[ "$fd_identity" == "$path_identity" ]] || exit 74
+          flock -n -E 75 9
+        ' _ /run/5gpn "$certificate_lock" >/dev/null 2>&1
+        rc=$?
+        set -e
+        case "$rc" in
+            0)
+                stable=$((stable + 1))
+                if (( stable >= 8 )); then
+                    assert_probe_candidate_runtime_clean \
+                        || probe_die 'candidate restarted while the certificate manager was settling'
+                    return 0
+                fi
+                ;;
+            75) stable=0 ;;
+            74) probe_die 'container certificate lock boundary is missing or unsafe' ;;
+            *) probe_die "could not inspect the container certificate lock (status $rc)" ;;
+        esac
+        sleep 0.25
+    done
+    probe_die 'container certificate manager did not become stably idle after startup'
+}
 
 current_revision() {
     api_request GET /5gpn/interception | jq -er .revision
@@ -80,6 +123,11 @@ cleanup_owned_fixture() {
 }
 trap cleanup_owned_fixture EXIT
 trap 'exit 130' HUP INT TERM
+
+# Startup deliberately serializes the interception and public-certificate
+# helpers. Do not consume the extension convergence budget while a valid
+# initial public renewal still owns their shared lock.
+wait_for_certificate_manager_idle
 
 manifest="$(cat <<EOF
 apiVersion: 5gpn.io/v1

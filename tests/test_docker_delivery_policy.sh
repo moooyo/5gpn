@@ -413,6 +413,7 @@ fi
 
 ACCEPTANCE="$ROOT/tests/container-acceptance.sh"
 PROBE_LIBRARY="$ROOT/tests/docker/probe-lib.sh"
+EXTENSION_PROBE="$ROOT/tests/docker/extension-worker-probe.sh"
 if grep -Fq 'FIVEGPN_EXPECTED_COMMIT' "$ACCEPTANCE" \
    && grep -Fq 'FIVEGPN_ACCEPTANCE_TARGET' "$ACCEPTANCE" \
    && grep -Fq 'disposable' "$ACCEPTANCE" \
@@ -430,7 +431,7 @@ if grep -Fq 'FIVEGPN_EXPECTED_COMMIT' "$ACCEPTANCE" \
    && grep -Fq 'io.5gpn.mihomo.sha256' "$ACCEPTANCE" \
    && grep -Fq '5gpn-container-runtime-v2' "$ACCEPTANCE" \
    && grep -Fq '/opt/5gpn/ui' "$ACCEPTANCE" \
-   && grep -Fq 'review_contract:8' "$ROOT/tests/docker/extension-worker-probe.sh" \
+   && grep -Fq 'review_contract:8' "$EXTENSION_PROBE" \
    && [[ "$(grep -Fc 'assert_container_boundary' "$ACCEPTANCE")" -ge 3 ]] \
    && grep -Fq 'tests/docker' "$ACCEPTANCE" \
    && ! grep -Eq 'FIVEGPN_(EXTENSION|WORKER_OOM|CERT_HOT_RELOAD|RECREATE)_PROBE' "$ACCEPTANCE" \
@@ -438,6 +439,39 @@ if grep -Fq 'FIVEGPN_EXPECTED_COMMIT' "$ACCEPTANCE" \
     pass "test-env acceptance binds the exact clean candidate and uses only versioned probes"
 else
     fail "test-env acceptance can use an unversioned probe or emit ambiguous evidence"
+fi
+
+certificate_idle_body="$(sed -n \
+    '/^wait_for_certificate_manager_idle()/,/^}/p' "$EXTENSION_PROBE")"
+certificate_idle_call_line="$(grep -n '^wait_for_certificate_manager_idle$' \
+    "$EXTENSION_PROBE" | head -1 | cut -d: -f1)"
+extension_review_line="$(grep -n '^review=' "$EXTENSION_PROBE" | head -1 | cut -d: -f1)"
+if [[ "$certificate_idle_call_line" =~ ^[0-9]+$ \
+   && "$extension_review_line" =~ ^[0-9]+$ \
+   && "$certificate_idle_call_line" -lt "$extension_review_line" ]] \
+   && grep -Fq '/run/5gpn/cert-renew.lock' "$EXTENSION_PROBE" \
+   && grep -Fq 'docker exec --user 10001:10001' <<<"$certificate_idle_body" \
+   && grep -Fq 'readlink -f -- "$runtime"' <<<"$certificate_idle_body" \
+   && grep -Fq '10001:10001:700' <<<"$certificate_idle_body" \
+   && grep -Fq 'stat -Lc "%u:%g:%a:%h"' <<<"$certificate_idle_body" \
+   && grep -Fq '10001:10001:600:1' <<<"$certificate_idle_body" \
+   && grep -Fq 'path_identity="$(stat -Lc "%d:%i" -- "$lock")"' \
+        <<<"$certificate_idle_body" \
+   && grep -Fq 'fd_identity="$(stat -Lc "%d:%i" -- "/proc/${BASHPID}/fd/9")"' \
+        <<<"$certificate_idle_body" \
+   && grep -Fq '[[ "$fd_identity" == "$path_identity" ]] || exit 74' \
+        <<<"$certificate_idle_body" \
+   && grep -Fq '[[ -e "$lock" && ! -L "$lock" ]] || exit 74' \
+        <<<"$certificate_idle_body" \
+   && grep -Fq 'flock -n -E 75 9' <<<"$certificate_idle_body" \
+   && grep -Fq '75) stable=0' <<<"$certificate_idle_body" \
+   && grep -Fq 'stable >= 8' <<<"$certificate_idle_body" \
+   && grep -Fq 'sleep 0.25' <<<"$certificate_idle_body" \
+   && grep -Fq '35 * 60' <<<"$certificate_idle_body" \
+   && grep -Fq 'assert_probe_candidate_runtime_clean' <<<"$certificate_idle_body"; then
+    pass "extension acceptance waits for a stably idle certificate manager"
+else
+    fail "extension acceptance can race the serialized startup certificate helpers"
 fi
 
 secret_source_line="$(grep -nF 'candidate_secret="$(jq -er .secret' \

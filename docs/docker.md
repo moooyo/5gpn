@@ -372,7 +372,10 @@ The driver derives `console.<base>` from the candidate's `dns.env` and reads
 the Controller secret only through the candidate Core's owner-scoped inspector.
 Before sending that secret, it verifies that the loopback-published HTTPS port
 serves the candidate's current Console leaf and pins every API request to that
-leaf's public key.
+leaf's public key. Before installing its temporary extension, it also requires
+the shared certificate-helper lock to be safely formed and stably idle. This
+keeps the extension convergence deadline independent of a valid initial public
+renewal that was already running when the Controller became ready.
 
 The run is mutating: it stops, renames, and re-creates the named container,
 rolling back on failure.
