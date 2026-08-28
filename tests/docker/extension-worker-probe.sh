@@ -26,6 +26,7 @@ extension_id="acceptance.docker.${run_id}"
 capture_host="docker-${run_id}.acceptance.example"
 request_file=/etc/5gpn/mihomo/5gpn/certificate-request
 state_file=/etc/5gpn/intercept/cert-state
+certificate_lock=/run/5gpn/cert-renew.lock
 installed=false
 install_attempted=false
 candidate_digest=''
@@ -36,6 +37,45 @@ oom_status_file="$(mktemp /tmp/5gpn-docker-oom-status.XXXXXX)"
 intercept_ca_file="$(mktemp /tmp/5gpn-docker-intercept-ca.XXXXXX)"
 oom_request_pid=''
 chmod 0600 "$oom_status_file" "$intercept_ca_file"
+
+wait_for_certificate_manager_idle() {
+    local rc stable=0 checks=0 deadline=$((SECONDS + 33 * 60))
+    while (( SECONDS < deadline )); do
+        set +e
+        docker exec "$FIVEGPN_PROBE_CONTAINER" /bin/bash -euo pipefail -c '
+          lock="$1"
+          if [[ ! -e "$lock" && ! -L "$lock" ]]; then
+            exit 2
+          fi
+          [[ -f "$lock" && ! -L "$lock" ]] || exit 3
+          [[ "$(stat -Lc "%u:%g:%a:%h" -- "$lock")" == "10001:10001:600:1" ]] || exit 3
+          exec 9<"$lock"
+          flock -n 9
+        ' _ "$certificate_lock" >/dev/null 2>&1
+        rc=$?
+        set -e
+        case "$rc" in
+            0)
+                stable=$((stable + 1))
+                if (( stable >= 8 )); then
+                    assert_probe_candidate_runtime_clean \
+                        || probe_die 'candidate restarted while the certificate manager was settling'
+                    return 0
+                fi
+                ;;
+            1|2) stable=0 ;;
+            3) probe_die 'container certificate lock metadata is unsafe' ;;
+            *) probe_die "could not inspect the container certificate lock (status $rc)" ;;
+        esac
+        checks=$((checks + 1))
+        if (( checks % 40 == 0 )); then
+            assert_probe_candidate_runtime_clean \
+                || probe_die 'candidate stopped or restarted while the certificate manager was settling'
+        fi
+        sleep 0.25
+    done
+    probe_die 'container certificate manager did not become stably idle after startup'
+}
 
 current_revision() {
     api_request GET /5gpn/interception | jq -er .revision
@@ -80,6 +120,11 @@ cleanup_owned_fixture() {
 }
 trap cleanup_owned_fixture EXIT
 trap 'exit 130' HUP INT TERM
+
+# Startup deliberately serializes the interception and public-certificate
+# helpers. Do not consume the extension convergence budget while a valid
+# initial public renewal still owns their shared lock.
+wait_for_certificate_manager_idle
 
 manifest="$(cat <<EOF
 apiVersion: 5gpn.io/v1
